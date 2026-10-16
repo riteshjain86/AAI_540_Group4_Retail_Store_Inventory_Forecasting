@@ -1,0 +1,85 @@
+# Configuration file for the Retail Store Inventory Demand Forecasting project
+
+data:
+  raw_path: data/raw/retail_store_inventory.csv
+  processed_path: data/processed
+  date_column: Date
+  store_column: Store ID
+  product_column: Product ID
+  target_column: Units Sold
+  # 70% train / 15% validation / 15% test, split chronologically (no shuffling,
+  # no stratification) to avoid leaking future information into training.
+  val_size: 0.15
+  test_size: 0.15
+  # 'Demand Forecast' is the dataset's own pre-computed forecast and would leak
+  # a forecast of the target into the features; 'Inventory Level' and
+  # 'Units Ordered' are downstream operational outcomes partly driven by sales,
+  # so both are excluded from the model inputs (see design document).
+  excluded_features:
+    - Demand Forecast
+    - Inventory Level
+    - Units Ordered
+
+feature_engineering:
+  lag_days: [1, 7, 14, 30]
+  rolling_windows: [7, 14, 30]
+  add_calendar_features: true
+  # Lookback window (days) used to build sequences for the LSTM / Transformer models
+  sequence_length: 30
+  # Forecast horizon in days (single-step-ahead forecasting)
+  horizon: 1
+
+training:
+  random_state: 42
+  # Candidates compared on the validation split:
+  #  - seasonal_naive: value 7 days ago (no training), establishes whether the
+  #    learned models add measurable value over a trivial baseline
+  #  - ridge, random_forest, gradient_boosting: classical ML on tabular
+  #    lag/rolling/calendar features
+  #  - lstm, transformer: sequence deep-learning models (see design document)
+  candidate_models:
+    - seasonal_naive
+    - ridge
+    - random_forest
+    - gradient_boosting
+    - lstm
+    - transformer
+  selection_metric: wape
+  deep_learning:
+    batch_size: 64
+    epochs: 50
+    early_stopping_patience: 5
+    learning_rate: 0.001
+    lstm:
+      units: [64, 32]
+      dropout: 0.2
+    transformer:
+      num_heads: 4
+      key_dim: 32
+      ff_dim: 64
+      num_blocks: 2
+      dropout: 0.1
+  # Minimum test-set quality gates; the pipeline fails if these are not met.
+  # The Kaggle dataset is synthetic with very little learnable signal beyond
+  # weekly seasonality (independent community analyses of the same dataset
+  # report R^2 of ~0.12-0.15 for tree-based regressors), so a WAPE ceiling
+  # around 0.65 is expected; the meaningful, checkable claim is that the
+  # selected model beats the seasonal-naive baseline by a clear margin.
+  quality_gates:
+    wape: 0.70
+    mae_improvement_over_naive: 0.10
+
+evaluation:
+  metrics: [mae, rmse, wape, smape]
+
+model:
+  output_dir: models
+
+mlflow:
+  experiment_name: retail_inventory_forecasting
+  tracking_uri: sqlite:///mlflow.db
+
+aws:
+  s3_prefix: retail-forecasting
+  feature_group_name: retail-inventory-features
+  model_package_group_name: retail-inventory-forecasting-models
