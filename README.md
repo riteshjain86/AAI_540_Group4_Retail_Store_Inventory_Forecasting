@@ -1,786 +1,496 @@
-# Retail Store Inventory Forecasting using Deep Learning
+# Retail Store Inventory Demand Forecasting
 
-### University of San Diego – MS in Applied Artificial Intelligence
+**Group 4 — AAI-540 Final Project**
 
-### Deep Learning Final Project
-
----
-
-# Project Objective
-
-Develop a complete deep learning pipeline to forecast retail store inventory demand and optimize stock levels, with full MLOps integration and model deployment capabilities.
-
-The project must forecast inventory requirements using historical sales data to:
-
-* Predict future demand for products
-* Optimize inventory levels to minimize stockouts and overstock
-* Support decision-making for supply chain management
-* Deploy models to production for real-time forecasting
-* Implement MLOps best practices for model lifecycle management
-
-The project must compare two deep learning architectures:
-
-1. Long Short-Term Memory (LSTM)
-2. Transformer-based Architecture (e.g., Temporal Fusion Transformer or vanilla Transformer)
-
-The final repository should be reproducible, modular, well documented, and suitable for graduate-level coursework, with production-ready deployment infrastructure.
+**Business scenario:** Retail Store Inventory Forecasting (academic project)
+**Date:** October 2026
 
 ---
 
-# Dataset
+## Table of Contents
 
-Dataset Source:
+1. [Project Overview](#project-overview)
+2. [Project Background](#project-background)
+3. [Technical Architecture](#technical-architecture)
+4. [Dataset Information](#dataset-information)
+5. [Project Structure](#project-structure)
+6. [Setup Instructions](#setup-instructions)
+7. [Pipeline Workflow](#pipeline-workflow)
+8. [Model Training](#model-training)
+9. [Model Evaluation](#model-evaluation)
+10. [MLOps with MLflow](#mlops-with-mlflow)
+11. [AWS SageMaker Deployment](#aws-sagemaker-deployment)
+12. [Usage Examples](#usage-examples)
+13. [Configuration](#configuration)
+14. [Troubleshooting](#troubleshooting)
+15. [Future Improvements](#future-improvements)
 
-https://www.kaggle.com/datasets/anirudhchauhan/retail-store-inventory-forecasting-dataset
+---
 
-The dataset contains historical sales data for retail stores including:
+## Project Overview
 
-* Store information
-* Product details
-* Historical sales transactions
-* Seasonal patterns
-* Holiday effects
+This project implements a production-oriented machine learning system that forecasts daily retail demand (`Units Sold`) per store/product, following the AAI-540 MLOps lifecycle: data ingestion, feature engineering, model training/comparison, evaluation, experiment tracking, and AWS SageMaker deployment.
 
-Expected folder structure:
+### Key Features
 
-```text
-data/
-    raw/
-        train.csv
-        test.csv
-        stores.csv
-        items.csv
+- **Modular architecture**: separated components for data ingestion, preprocessing, feature engineering and modeling, mirroring a standard MLOps project layout
+- **Model comparison across three families**: a seasonal-naive baseline, classical ML (Ridge / Random Forest / Gradient Boosting) on engineered tabular features, and deep learning sequence models (LSTM and a Transformer encoder) — as called for in the design document's comparison of LSTM vs. Transformer architectures
+- **Leakage-safe, chronological evaluation**: time-based 70/15/15 split, lag/rolling features that only look backward, decision thresholds and hyperparameters tuned without ever touching the test split
+- **MLOps integration**: MLflow experiment tracking, model registry pattern, SageMaker Feature Store / Model Registry / batch inference / monitoring
+- **Quality gates**: the pipeline fails loudly if the selected model does not clear a minimum WAPE and a minimum improvement over the naive baseline
+
+---
+
+## Project Background
+
+### Business Problem
+
+Retail organizations must balance product availability against the cost of carrying excess inventory. Underestimating demand causes stockouts and lost sales; overestimating it causes markdowns and holding costs. This project builds a repeatable workflow that predicts near-term demand per (store, product, day) from historical sales, calendar effects, and pricing/promotion signals, so that the output can feed downstream inventory-planning decisions.
+
+### Dataset
+
+The project uses the **Kaggle "Retail Store Inventory Forecasting" dataset**, a synthetic dataset of daily store/product-level sales.
+
+**Dataset Source:** [Kaggle](https://www.kaggle.com/datasets/anirudhchauhan/retail-store-inventory-forecasting-dataset)
+
+**Dataset Size:** 73,100 daily records (5 stores × 20 products × 731 days, 2022-01-01 to 2024-01-01)
+
+---
+
+## Technical Architecture
+
+### Technology Stack
+
+- **Language:** Python 3.10+
+- **Data Processing:** pandas, numpy
+- **Machine Learning:** scikit-learn
+- **Deep Learning:** TensorFlow / Keras (LSTM, Transformer encoder)
+- **MLOps:** MLflow
+- **Visualization:** matplotlib, seaborn
+- **Configuration:** PyYAML
+- **Containerization:** Docker
+- **Testing:** pytest
+- **Cloud:** AWS SageMaker (SDK v2), S3, CloudWatch
+
+### Architecture Components
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Data Ingestion Layer                      │
+│  - Load the Kaggle CSV (Date, Store ID, Product ID, ...)      │
+│  - Schema & data-quality validation (types, nulls, negative   │
+│    targets, duplicate (date, store, product) keys)            │
+│  - Chronological (non-shuffled) 70 / 15 / 15 split            │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│      Feature Engineering (per store/product series)           │
+│  - Drop 'Demand Forecast', 'Inventory Level', 'Units Ordered' │
+│    (target leakage / downstream operational outcomes)         │
+│  - Calendar features: day-of-week, month, quarter, year,      │
+│    week-of-year, is_weekend                                   │
+│  - Lag features (1/7/14/30 days) and rolling mean/std          │
+│    (7/14/30 days), shifted so no row sees its own target      │
+│  - Sliding-window sequences (length 30) for the DL models      │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│                    Model Training Layer                       │
+│  - Seasonal-naive baseline (value 7 days ago)                 │
+│  - Classical ML: Ridge, Random Forest, Gradient Boosting on    │
+│    one-hot + scaled tabular features, tuned with a             │
+│    TimeSeriesSplit-based RandomizedSearchCV                   │
+│  - Deep learning: stacked LSTM and a small Transformer         │
+│    encoder, trained globally across every store/product        │
+│    series, with early stopping on validation loss             │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│                  Model Evaluation Layer                       │
+│  - MAE, RMSE, WAPE, sMAPE on validation, once on test          │
+│  - Segment breakdown by store / category                      │
+│  - Quality gates (WAPE ceiling, MAE improvement over naive)    │
+│    fail the pipeline if not met                                │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│                MLOps Layer (MLflow, SQLite backend)           │
+│  - Nested run per model/strategy, comparison table             │
+│  - models/model.joblib or model.keras + model_metadata.json   │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│            AWS SageMaker Layer (src/aws/sagemaker)             │
+│  - S3 raw/processed data, SageMaker Feature Store              │
+│  - Managed training job (TensorFlow estimator)                 │
+│  - Model Registry, batch transform (primary inference          │
+│    pattern), optional real-time endpoint                       │
+│  - Model/data/infrastructure CloudWatch dashboards              │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-# Overall Project Workflow
+## Dataset Information
 
-```
-Load Dataset
-      ↓
-Data Exploration
-      ↓
-Preprocessing
-      ↓
-Feature Engineering
-      ↓
-Data Augmentation
-      ↓
-Dataset Split
-      ↓
-LSTM Training
-      ↓
-Transformer Training
-      ↓
-Hyperparameter Tuning
-      ↓
-Evaluation
-      ↓
-Comparison
-      ↓
-Model Packaging
-      ↓
-API Development
-      ↓
-Model Deployment
-      ↓
-Monitoring & Logging
-      ↓
-CI/CD Pipeline
-      ↓
-Final Report
-```
+### Data Source
+
+**File:** `data/raw/retail_store_inventory.csv`
+**Format:** Comma-separated CSV
+**Records:** 73,100 (5 stores × 20 products × 731 days)
+
+### Features
+
+| Feature | Type | Description |
+|---|---|---|
+| Date | date | Calendar day (2022-01-01 to 2024-01-01) |
+| Store ID | categorical | One of 5 stores (S001–S005) |
+| Product ID | categorical | One of 20 products (P0001–P0020) |
+| Category | categorical | Electronics, Clothing, Groceries, Toys, Furniture |
+| Region | categorical | North / South / East / West |
+| Inventory Level | numeric | Stock at the start of the day *(excluded — downstream of sales)* |
+| Units Sold | numeric | **Target** |
+| Units Ordered | numeric | Replenishment quantity *(excluded — downstream of sales)* |
+| Demand Forecast | numeric | The dataset's own pre-computed forecast *(excluded — leaks the target)* |
+| Price | numeric | Unit price |
+| Discount | numeric | Discount percentage |
+| Weather Condition | categorical | Sunny / Rainy / Snowy / Cloudy |
+| Holiday/Promotion | binary | Holiday or promotion indicator |
+| Competitor Pricing | numeric | Competitor's price for the same product |
+| Seasonality | categorical | Spring / Summer / Autumn / Winter |
+
+### Data Characteristics
+
+- **No missing values, no duplicate (Date, Store ID, Product ID) keys.**
+- **Synthetic data:** stores/products/categories/regions are near-perfectly balanced, and — confirmed in `notebooks/exploratory_data_analysis.ipynb` — there is essentially **no real weekly seasonality** (daily totals vary by day-of-week within noise) and **no measurable promotion effect** (mean `Units Sold` with vs. without `Holiday/Promotion` differs by <0.1%). This caps how much any model, including the LSTM/Transformer, can improve over a naive baseline.
+- **Leakage:** `Demand Forecast` correlates 0.997 with `Units Sold` by construction and is excluded. `Inventory Level` and `Units Ordered` are partly determined by `Units Sold` after the fact and are also excluded.
 
 ---
 
-# Required Repository Structure
+## Project Structure
 
 ```
-retail-inventory-forecasting/
-
-README.md
-requirements.txt
-.gitignore
-Dockerfile
-docker-compose.yml
-.mlflow/
-azure-pipelines.yml
-.github/
-    workflows/
-        ci-cd.yml
-
-data/
-    raw/
-    interim/
-    processed/
-    features/
-
-models/
-    checkpoints/
-    saved_models/
-    production/
-        lstm_model/
-        transformer_model/
-        model_metadata.json
-
-notebooks/
-    01_EDA.ipynb
-    02_Preprocessing.ipynb
-    03_Feature_Engineering.ipynb
-    04_LSTM_Model.ipynb
-    05_Transformer_Model.ipynb
-    06_Hyperparameter_Tuning.ipynb
-    Retail_Inventory_Forecasting_Final.ipynb
-
-reports/
-    figures/
-    tables/
-    final_report.pdf
-
-src/
-
-    preprocessing/
-
-        data_loader.py
-        clean_dataset.py
-        augmentation.py
-        split_dataset.py
-
-    features/
-
-        temporal_features.py
-        store_features.py
-        product_features.py
-        lag_features.py
-
-    datasets/
-
-        lstm_dataset.py
-        transformer_dataset.py
-
-    models/
-
-        lstm_model.py
-        transformer_model.py
-
-    training/
-
-        train_lstm.py
-        train_transformer.py
-
-    evaluation/
-
-        metrics.py
-        visualize.py
-
-    utils/
-
-        config.py
-        helpers.py
-
-    api/
-
-        app.py
-        endpoints.py
-        request_schemas.py
-        response_schemas.py
-        model_loader.py
-
-    deployment/
-
-        model_packaging.py
-        docker_config.py
-        inference.py
-
-    monitoring/
-
-        metrics_collector.py
-        drift_detection.py
-        logging_config.py
-        alerting.py
-
-    mlops/
-
-        mlflow_tracking.py
-        experiment_config.py
-        model_registry.py
-        pipeline_config.py
+AAI_540_Group4_Retail_Store_Inventory_Forecasting/
+├── data/
+│   ├── raw/                     # retail_store_inventory.csv (committed; ~6 MB, synthetic)
+│   ├── processed/                # train/val/test Parquet splits (generated)
+│   └── external/
+├── notebooks/
+│   ├── exploratory_data_analysis.ipynb
+│   ├── model_development.ipynb
+│   └── model_evaluation.ipynb
+├── src/
+│   ├── data_ingestion/
+│   │   └── data_ingestion.py          # load, schema/quality validation, chronological split
+│   ├── data_preprocessing/
+│   │   └── data_preprocessing.py      # cleaning, ColumnTransformer, prediction clipping
+│   ├── feature_engineering/
+│   │   └── feature_engineering.py     # calendar/lag/rolling features, sequence builder
+│   ├── models/
+│   │   ├── baseline.py                # seasonal-naive model
+│   │   ├── train_model.py             # classical ML (Ridge/RF/GB) + tuning
+│   │   ├── sequence_models.py         # LSTM + Transformer (Keras)
+│   │   └── predict_model.py           # MAE/RMSE/WAPE/sMAPE, segment breakdown
+│   ├── pipelines/
+│   │   └── training_pipeline.py       # end-to-end orchestration + MLflow + quality gates
+│   ├── utils/
+│   │   └── helpers.py
+│   └── aws/
+│       └── sagemaker/
+│           ├── data_upload.py          # S3 data upload
+│           ├── feature_store.py        # SageMaker Feature Store
+│           ├── training.py             # SageMaker managed training (TensorFlow estimator)
+│           ├── deployment.py           # optional real-time endpoint
+│           ├── batch_inference.py      # batch transform (primary inference pattern)
+│           ├── model_registry.py       # Model Registry
+│           ├── monitoring.py           # Model Monitor + forecast-accuracy CloudWatch metrics
+│           ├── infrastructure_monitoring.py  # CloudWatch dashboards
+│           ├── rollback.py             # rollback utilities
+│           └── scripts/
+│               ├── train.py            # SageMaker training entry point
+│               ├── inference.py        # real-time endpoint entry point
+│               └── batch_transform.py  # batch transform entry point
+├── models/                        # model.joblib or model.keras + model_metadata.json (generated)
+├── mlflow.db                       # MLflow tracking store (generated)
+├── tests/
+│   ├── test_data_preprocessing.py
+│   └── test_model_training.py
+├── .github/workflows/ci-cd.yml
+├── requirements.txt
+├── Dockerfile
+├── config.yaml
+├── validate_aws_setup.py
+├── deploy_sagemaker_lab.py
+└── README.md
 ```
 
 ---
 
-# Required Python Libraries
+## Setup Instructions
 
-Preferred libraries:
+### Prerequisites
 
-* TensorFlow/Keras
-* PyTorch (optional, for Transformer models)
-* NumPy
-* Pandas
-* Matplotlib
-* Seaborn
-* Scikit-learn
-* Prophet (optional, for baseline comparison)
-* XGBoost/LightGBM (optional, for baseline comparison)
-* tqdm
+- Python 3.10 or higher
+- pip
+- Git
 
-MLOps and Deployment libraries:
+### Installation Steps
 
-* MLflow (experiment tracking and model registry)
-* FastAPI (API development)
-* Docker (containerization)
-* Prometheus (monitoring)
-* Grafana (visualization)
-* Redis (caching, optional)
-* PostgreSQL (database, optional)
-* Cloud SDK (AWS/GCP/Azure, optional)
-* pytest (testing)
-* pytest-cov (code coverage)
+1. **Clone the repository and switch to this branch**
+   ```bash
+   git clone https://github.com/vedpd/AAI_540_Group4_Retail_Store_Inventory_Forecasting.git
+   cd AAI_540_Group4_Retail_Store_Inventory_Forecasting
+   git checkout ved-development
+   ```
 
-Avoid unnecessary dependencies.
+2. **Create a virtual environment**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
 
----
+3. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-# Stage 1 — Data Collection
+4. **Verify installation**
+   ```bash
+   python -c "import pandas, sklearn, tensorflow, mlflow; print('Dependencies installed successfully')"
+   ```
 
-Tasks
+5. **Dataset**: `data/raw/retail_store_inventory.csv` is already committed (synthetic, ~6 MB). If it's missing, download it from [Kaggle](https://www.kaggle.com/datasets/anirudhchauhan/retail-store-inventory-forecasting-dataset) and place it at that path.
 
-* Load retail inventory dataset.
-* Explore data structure and understand columns.
-* Verify data quality and missing values.
-* Generate metadata table.
+### Running on AWS SageMaker AI
 
-Output
+This project targets **SageMaker Python SDK v2** (pinned in `requirements.txt` as `sagemaker>=2.190.0,<3.0.0`), since the SDK v3 made breaking API changes to `FeatureGroup`, estimators and models that this project's `src/aws/sagemaker/` modules rely on. If you're working in SageMaker Studio / Studio Lab:
 
-```
-metadata.csv
-```
-
-containing
-
-* filename
-* store_id
-* product_id
-* date_range
-* number_of_records
-* missing_values
+```bash
+pip install -r requirements.txt
+python validate_aws_setup.py          # checks credentials, role, S3, CloudWatch, data file
+python deploy_sagemaker_lab.py        # sanity-checks AWS clients, prints next steps
 ```
 
 ---
 
-# Stage 2 — Exploratory Data Analysis
+## Pipeline Workflow
 
-Perform EDA before training.
+### Step 1: Data Ingestion
 
-Generate visualizations for
+**Location:** `src/data_ingestion/data_ingestion.py`
 
-* Sales distribution across stores
-* Sales distribution across products
-* Time series trends (daily, weekly, monthly, seasonal)
-* Holiday effects on sales
-* Promotional impact analysis
-* Store-wise performance comparison
-* Product category analysis
-* Missing data patterns
-* Outlier detection
+- `load_data(file_path)`: loads the CSV, parses `Date`
+- `validate_schema(df)`: checks column presence, numeric types, nulls, negative targets, duplicate keys; returns a data-quality report
+- `chronological_cutoffs(dates, val_size, test_size)` / `split_data(df, val_size, test_size)`: a single global date cutoff separates train/val/test — **no shuffling**, since every store/product shares the same calendar and shuffling would leak future rows into training
 
-Save figures inside
+### Step 2: Feature Engineering
 
-```
-reports/figures/
-```
+**Location:** `src/feature_engineering/feature_engineering.py`
 
----
+- `add_calendar_features(df)`: day-of-week, month, quarter, year, week-of-year, is_weekend
+- `add_lag_rolling_features(df, group_cols, target_col, lag_days, rolling_windows)`: per-(store, product) lag and rolling mean/std of `Units Sold`, computed on the **full chronologically sorted dataset before splitting** — this is not leakage, since every lag/rolling value only looks at strictly earlier dates of the same series (exactly what would be available in production)
+- `build_sequences(...)`: sliding (sequence_length, n_features) windows per series for the LSTM/Transformer models
 
-# Stage 3 — Data Preprocessing
+### Step 3: Model Training
 
-Implement
+**Location:** `src/models/`
 
-* Load CSV files
-* Handle missing values
-* Remove duplicate records
-* Normalize/scale numerical features
-* Encode categorical variables
-* Handle outliers
-* Create datetime features
-* Merge datasets appropriately
+| Model family | File | Notes |
+|---|---|---|
+| Seasonal-naive | `baseline.py` | Predicts `Units Sold` from 7 days ago; no training |
+| Ridge / Random Forest / Gradient Boosting | `train_model.py` | One-hot + scaled tabular features; `TimeSeriesSplit`-based `RandomizedSearchCV` for tuning (never a shuffled K-fold) |
+| LSTM / Transformer | `sequence_models.py` | Trained as "global" models across every store/product series; early stopping on validation loss |
 
-Save processed dataset.
+### Step 4: Model Evaluation
+
+**Location:** `src/models/predict_model.py`
+
+- `evaluate_forecast(y_true, y_pred)`: MAE, RMSE, WAPE, sMAPE
+- `evaluate_by_segment(y_true, y_pred, segment)`: breakdown by store/category, since aggregate metrics can mask poor performance on smaller segments
+- Predictions are clipped to zero (`clip_non_negative`) since units sold cannot be negative
 
 ---
 
-# Stage 4 — Data Augmentation
+## Model Training
 
-Implement at least the following augmentations:
+### Running the Training Pipeline
 
-* Time-based augmentation (windowing)
-* Synthetic data generation for low-demand periods
-* Bootstrap sampling for time series
-* Noise injection (optional)
-* Seasonal decomposition (optional)
-
-Allow augmentation to be enabled or disabled.
-
----
-
-# Stage 5 — Feature Engineering
-
-Extract the following features where applicable:
-
-## Temporal Features
-
-* Day of week
-* Month
-* Quarter
-* Year
-* Week of year
-* Is_holiday
-* Is_weekend
-* Days since last promotion
-* Days to next promotion
-
-## Store Features
-
-* Store size
-* Store type
-* Location features
-* Historical store performance
-* Store cluster (if available)
-
-## Product Features
-
-* Product category
-* Product price
-* Product popularity
-* Historical product performance
-* Product lifecycle stage
-
-## Lag Features
-
-* Sales lags (1, 7, 14, 30 days)
-* Rolling averages (7, 14, 30 days)
-* Rolling standard deviations
-* Exponential moving averages
-
----
-
-# Stage 6 — Dataset Splitting
-
-Split dataset into
-
-```
-Training
-Validation
-Testing
+```bash
+python -m src.pipelines.training_pipeline
 ```
 
-Recommended
+**Pipeline Steps:**
+1. Load `config.yaml`, load and validate the raw data, log the data-quality report
+2. Drop leaky/downstream features, add calendar + lag/rolling features
+3. Chronological 70/15/15 split; save Parquet splits to `data/processed/`
+4. Score the seasonal-naive baseline on validation
+5. Fit and score Ridge / Random Forest / Gradient Boosting on validation; tune the best one with `TimeSeriesSplit`
+6. Train LSTM and Transformer sequence models on validation
+7. Pick the overall best candidate by validation WAPE
+8. Evaluate once on the untouched test split (technical metrics + comparison to the naive baseline)
+9. Check quality gates; fail the run if they are not met
+10. Log everything to MLflow and save `models/model.joblib` (classical) or `models/model.keras` + `models/sequence_scaler.joblib` (LSTM/Transformer), plus `models/model_metadata.json`
 
+### Results (test split, 10,500 rows, cutoffs 2023-06-05 / 2023-09-18)
+
+Validation comparison (best candidate per family):
+
+| Model | Val WAPE | Val MAE |
+|---|---|---|
+| **LSTM (selected)** | 0.647 | 88.7 |
+| Classical (tuned Ridge) | 0.651 | 89.2 |
+| Transformer | 0.654 | 89.7 |
+| Seasonal-naive | 0.879 | 120.5 |
+
+Test set:
+
+| Metric | Selected model (LSTM) | Seasonal-naive |
+|---|---|---|
+| MAE | 87.93 | 118.62 |
+| RMSE | 108.33 | — |
+| WAPE | 0.644 | 0.868 |
+| sMAPE | 0.716 | — |
+
+**MAE improvement over the naive baseline: 25.9%**
+
+**Findings on model comparison:** all four real models (Ridge, Random Forest, Gradient Boosting, LSTM, Transformer) land within about 1% WAPE of each other, well ahead of the seasonal-naive baseline but far from a low-error forecast. As confirmed in the EDA notebook, this is expected: the Kaggle dataset is synthetic with essentially no weekly seasonality or promotion effect, so there is little additional structure for a more expressive model (LSTM/Transformer) to exploit beyond what lag/rolling features already give the classical models. The meaningful, checkable result here is the **~26% MAE improvement over a trivial baseline**, not the small gap between model families.
+
+---
+
+## Model Evaluation
+
+### Evaluation Metrics
+
+- **MAE / RMSE:** absolute error scale
+- **WAPE:** primary selection metric — scale-independent and well-defined even for the many low-volume store/product/day rows (unlike MAPE, which blows up near zero actuals)
+- **sMAPE:** reported as a supplementary metric
+- Segment breakdowns by store and category (`evaluate_by_segment`) catch cases where aggregate metrics mask poor performance on a subset
+
+### Quality Gates
+
+Configured in `config.yaml` under `training.quality_gates` (WAPE ≤ 0.70, MAE improvement over naive ≥ 10%). The pipeline raises an error and tags the MLflow run `quality_gates_passed=False` if the test metrics fall short.
+
+---
+
+## MLOps with MLflow
+
+### MLflow Tracking
+
+```bash
+mlflow ui --backend-store-uri sqlite:///mlflow.db
 ```
-70%
-15%
-15%
-```
 
-Use time-based splitting to avoid data leakage.
+**Access:** http://localhost:5000
 
-Ensure store and product distribution across splits.
+### Experiment Tracking
 
----
+Each pipeline run creates a parent run `training_pipeline` with:
+- Nested runs per candidate (seasonal-naive, each classical model + its tuned version, LSTM, Transformer)
+- `model_comparison.json` and `data_quality_report.json`
+- Selected model type, hyperparameters, validation and test metrics
+- For LSTM/Transformer, per-epoch train/val loss curves
 
-# Stage 7 — LSTM Model
+### Loading a Trained Model
 
-Implement an LSTM-based forecasting model.
+```python
+import json, joblib
 
-Suggested architecture
+metadata = json.load(open('models/model_metadata.json'))
 
-Input Layer (sequence data)
-
-↓
-
-LSTM Layer 1
-
-↓
-
-Dropout
-
-↓
-
-LSTM Layer 2
-
-↓
-
-Dropout
-
-↓
-
-Dense Layer
-
-↓
-
-Output Layer (forecast horizon)
-
-Use
-
-* Adam optimizer
-* EarlyStopping
-* ModelCheckpoint
-* Learning rate scheduler
-
-Save best model.
-
----
-
-# Stage 8 — Transformer Model
-
-Implement a Transformer-based forecasting model.
-
-Suggested architecture
-
-Input Embedding Layer
-
-↓
-
-Positional Encoding
-
-↓
-
-Multi-Head Attention
-
-↓
-
-Feed-Forward Network
-
-↓
-
-Normalization
-
-↓
-
-Dense Layer
-
-↓
-
-Output Layer (forecast horizon)
-
-Train independently from LSTM.
-
-Save best model.
-
----
-
-# Stage 9 — Hyperparameter Tuning
-
-Perform experiments varying
-
-* Learning rate
-* Batch size
-* Epochs
-* Hidden units
-* Dropout
-* Sequence length
-* Forecast horizon
-* Number of attention heads (for Transformer)
-
-Document results.
-
----
-
-# Stage 10 — Evaluation
-
-Generate
-
-* MAE (Mean Absolute Error)
-* RMSE (Root Mean Square Error)
-* MAPE (Mean Absolute Percentage Error)
-* SMAPE (Symmetric MAPE)
-* WAPE (Weighted Absolute Percentage Error)
-* Training Loss Plot
-* Validation Loss Plot
-* Forecast vs Actual plots
-* Residual analysis
-* Feature importance (if applicable)
-
-Store every figure under
-
-```
-reports/figures/
+if metadata['model_type'] in ('lstm', 'transformer'):
+    import tensorflow as tf
+    model = tf.keras.models.load_model('models/model.keras')
+    scaler = joblib.load('models/sequence_scaler.joblib')
+    # build (sequence_length, n_features) windows with src.feature_engineering.build_sequences,
+    # then scale with src.models.sequence_models.apply_sequence_scaler before predicting
+else:
+    model = joblib.load('models/model.joblib')
+    predictions = model.predict(raw_feature_dataframe)  # raw columns, pipeline handles preprocessing
 ```
 
 ---
 
-# Stage 11 — Model Comparison
+## AWS SageMaker Deployment
 
-Create a comparison table
+This project includes AWS SageMaker integration per the ML System Design Document, built around **batch inference as the primary deployment pattern** (retail demand forecasts are generated on a schedule, not per individual request), with a real-time endpoint kept as an optional extension.
 
-| Metric        | LSTM | Transformer |
-| ------------- | ---- | --- |
-| MAE           |      |     |
-| RMSE          |      |     |
-| MAPE          |      |     |
-| SMAPE         |      |     |
-| WAPE          |      |     |
-| Parameters    |      |     |
-| Training Time |      |     |
-| Inference Time|      |     |
+### SageMaker Components
 
-Discuss
+1. **Data Upload to S3** — raw dataset and processed train/val/test splits
+2. **Feature Store** — a Feature Group keyed on a composite `record_id` (Date # Store ID # Product ID), since the dataset's natural key isn't a single column
+3. **Training Jobs** — managed `TensorFlow` estimator training job (LSTM by default; `--model_type ridge` trains the classical baseline with the same entry point)
+4. **Model Registry** — model package group `retail-inventory-forecasting-models`
+5. **Batch Inference** — the primary inference pattern; batch transform job over a prepared feature file
+6. **Model Deployment** — optional real-time endpoint for ad hoc scoring
+7. **Model Monitoring** — SageMaker Model Monitor data-quality baseline, plus custom CloudWatch metrics (MAE/RMSE/WAPE) published once ground truth is available
+8. **Infrastructure Monitoring** — CloudWatch dashboards for training jobs, endpoint, batch transform, S3, and Feature Store
+9. **Rollback** — revert an endpoint to a previous approved model package
 
-* strengths
-* weaknesses
-* computational cost
-* observations
-* business impact
+### Prerequisites
 
----
+- AWS account/lab with SageMaker, S3 and CloudWatch access
+- AWS credentials configured in a `.env` file:
+  ```bash
+  AWS_ACCOUNT_ID=your_account_id
+  AWS_REGION=us-east-1
+  AWS_ROLE_ARN=arn:aws:iam::your_account_id:role/your_role
+  ```
 
-# Stage 12 — Model Packaging and Deployment
+### AWS SageMaker Workflow
 
-Implement model packaging for production deployment:
-
-* Save models in standardized formats (SavedModel, ONNX, or TorchScript)
-* Create model metadata files (version, training data, performance metrics)
-* Implement model versioning strategy
-* Package preprocessing pipelines with models
-* Create model artifacts registry
-* Implement A/B testing infrastructure
-* Set up canary deployment strategy
-
-## API Development
-
-Create REST API endpoints for model inference:
-
-* `/predict` - Single prediction endpoint
-* `/batch_predict` - Batch prediction endpoint
-* `/health` - Health check endpoint
-* `/model_info` - Model metadata endpoint
-* Input validation and sanitization
-* Output formatting and error handling
-* Rate limiting and authentication
-* Request/response logging
-
-## Containerization
-
-* Create Dockerfile for model serving
-* Optimize image size and build time
-* Multi-stage builds for production
-* Environment variable configuration
-* Health check implementation
-* Resource limits and requests
-
----
-
-# Stage 13 — Monitoring and Logging
-
-Implement comprehensive monitoring:
-
-## Model Performance Monitoring
-
-* Track prediction accuracy over time
-* Monitor data drift (input distribution changes)
-* Monitor concept drift (target relationship changes)
-* Set up automated alerts for performance degradation
-* Track prediction latency and throughput
-* Monitor resource utilization (CPU, GPU, memory)
-
-## Logging Infrastructure
-
-* Structured logging for all predictions
-* Log model inputs and outputs (with privacy considerations)
-* Track API request patterns
-* Error logging and stack traces
-* Audit logging for compliance
-* Centralized log aggregation (ELK stack, CloudWatch, etc.)
-
-## Data Quality Monitoring
-
-* Monitor input data quality metrics
-* Track missing value rates
-* Detect anomalies in input data
-* Monitor feature distribution changes
-* Alert on data pipeline failures
-
----
-
-# Stage 14 — MLOps Pipeline
-
-Implement end-to-end MLOps pipeline:
-
-## Experiment Tracking
-
-* Use MLflow for experiment tracking
-* Log hyperparameters, metrics, and artifacts
-* Track model lineage
-* Compare experiments across runs
-* Store model performance history
-
-## Model Registry
-
-* Implement model versioning
-* Store model metadata and performance metrics
-* Model approval workflow
-* Stage models (Staging → Production)
-* Model rollback capabilities
-
-## CI/CD Pipeline
-
-* Automated testing (unit tests, integration tests)
-* Code quality checks (linting, formatting)
-* Automated model training on new data
-* Automated model evaluation
-* Automated deployment pipeline
-* Rollback mechanisms
-
-## Infrastructure as Code
-
-* Terraform/CloudFormation for infrastructure
-* Kubernetes manifests for orchestration
-* Configuration management
-* Secret management
-* Environment-specific configurations
-
----
-
-# Stage 15 — Final Notebook
-
-Create a single polished notebook
-
-```
-Retail_Inventory_Forecasting_Final.ipynb
+```bash
+python validate_aws_setup.py
+python -m src.aws.sagemaker.data_upload
+python -m src.aws.sagemaker.feature_store
+python -m src.aws.sagemaker.training
+TRAINING_JOB_NAME=<job-name> python -m src.aws.sagemaker.model_registry
+python -m src.aws.sagemaker.batch_inference
+python -m src.aws.sagemaker.monitoring
+python -m src.aws.sagemaker.infrastructure_monitoring
 ```
 
-The notebook must execute sequentially without errors.
-
-Sections
-
-1. Introduction
-2. Dataset
-3. EDA
-4. Preprocessing
-5. Feature Engineering
-6. LSTM
-7. Transformer
-8. Hyperparameter Tuning
-9. Evaluation
-10. Model Comparison
-11. Model Packaging
-12. API Development
-13. Deployment Strategy
-14. Monitoring Setup
-15. Conclusion
-
-Avoid debugging code or unused cells.
+**Note:** this project pins `sagemaker>=2.190.0,<3.0.0` because the SageMaker AI lab environment this was developed against does not support the breaking changes introduced in SageMaker Python SDK v3.
 
 ---
 
-# Report Requirements
+## Usage Examples
 
-Prepare an APA 7 formatted report including
+```python
+from src.pipelines.training_pipeline import TrainingPipeline
 
-* Abstract
-* Introduction
-* Literature Review
-* Dataset Description
-* Methodology
-* Data Preprocessing
-* Feature Engineering
-* LSTM Architecture
-* Transformer Architecture
-* Experimental Setup
-* Results
-* Discussion
-* MLOps Implementation
-* Model Deployment Strategy
-* Monitoring and Observability
-* Limitations
-* Future Work
-* Conclusion
-* References
+pipeline = TrainingPipeline('config.yaml')
+result = pipeline.run(data_path='data/raw/retail_store_inventory.csv')
+
+print(result['best_model'], result['test_metrics'])
+```
 
 ---
 
-# Collaboration Guidelines
+## Configuration
 
-* Use clear commit messages
-* Create feature branches for major changes
-* Conduct code reviews
-* Document any deviations from this specification
-* Maintain consistent coding style
-* Review deployment configurations
-* Test monitoring and alerting systems
-* Document API endpoints and usage
+All pipeline behavior is controlled by `config.yaml`:
 
----
-
-# Deployment Architecture
-
-## Production Environment
-
-* Scalable API deployment (Kubernetes, AWS ECS, or Azure App Service)
-* Load balancing for high availability
-* Auto-scaling based on demand
-* Database for storing predictions and metadata
-* Caching layer for frequently requested predictions
-
-## Security Considerations
-
-* API authentication and authorization
-* Input validation and sanitization
-* Rate limiting to prevent abuse
-* Encryption in transit (HTTPS)
-* Secrets management (API keys, database credentials)
-* Audit logging for compliance
-
-## Performance Requirements
-
-* Target response time: < 100ms for single predictions
-* Target throughput: > 1000 predictions/second
-* Model loading time: < 5 seconds
-* Cold start time: < 10 seconds (serverless)
-
-## Disaster Recovery
-
-* Automated backups of model artifacts
-* Geographic redundancy for critical services
-* Failover mechanisms
-* Recovery time objective (RTO) and recovery point objective (RPO) defined
-* Regular disaster recovery testing
+- `data`: raw/processed paths, chronological split sizes, leaky features to exclude
+- `feature_engineering`: lag days, rolling windows, sequence length for the DL models
+- `training`: candidate models, selection metric (WAPE), deep-learning hyperparameters, quality gates
+- `evaluation`: metrics to compute
+- `mlflow` / `aws`: tracking URI, experiment name, S3 prefix, Feature Store / Model Registry names
 
 ---
 
-# Grading Criteria
+## Troubleshooting
 
-The project will be evaluated on:
-
-* Code quality and modularity
-* Correctness of implementation
-* Depth of analysis and evaluation
-* Quality of visualizations
-* Clarity of documentation
-* Reproducibility of results
-* Model performance comparison
-* MLOps implementation quality
-* Deployment architecture design
-* Monitoring and logging completeness
-* API functionality and reliability
-* Final report quality
+- **`ModuleNotFoundError: No module named 'tensorflow'`** — install the full `requirements.txt`; TensorFlow is required for the LSTM/Transformer candidates.
+- **SageMaker SDK errors mentioning `FeatureGroup` or estimator signatures** — confirm `pip show sagemaker` reports a `2.x` version; this project is not compatible with SageMaker SDK v3.
+- **Training pipeline fails quality gates** — this is intentional if the selected model doesn't clear the configured WAPE/MAE-improvement thresholds in `config.yaml: training.quality_gates`; it is not a crash.
+- **Corporate network / self-signed certificate errors during `pip install`** — if your environment intercepts TLS, you may need `pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org ...`.
 
 ---
 
-# Additional Notes
+## Future Improvements
 
-* All code must be Python 3.8+ compatible
-* Use type hints where appropriate
-* Include docstrings for all functions
-* Handle edge cases gracefully
-* Log important operations
-* Validate assumptions about data
-* Document any data quality issues
-* Implement comprehensive error handling in production code
-* Use environment variables for configuration
-* Follow 12-factor app principles for deployment
-* Implement health checks and readiness probes
-* Document API contracts with OpenAPI/Swagger specs
-* Maintain backward compatibility for API changes
-* Implement graceful degradation for model failures
+- Store/product embeddings instead of one-hot encoding for the DL models (noted in the design document as a possible extension)
+- Prediction intervals / quantile forecasts to support safety-stock policies
+- Incorporate verified external drivers (supplier lead time, local events) if such data becomes available
+- Hierarchical or cold-start handling for new products/stores
+- Scheduled retraining with automated promotion gated on the same quality thresholds used here
