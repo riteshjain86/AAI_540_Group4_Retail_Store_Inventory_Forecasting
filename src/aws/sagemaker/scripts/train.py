@@ -1,0 +1,185 @@
+"""
+Standalone SageMaker training script for retail demand forecasting.
+
+This script is uploaded to S3 and run inside the managed training container,
+so it is self-contained (it does not import the project's `src` package).
+It supports the two model families produced by the local pipeline:
+
+  - 'lstm': a stacked LSTM regressor (TensorFlow/Keras) over lag/rolling/
+    calendar feature sequences
+  - 'ridge': a Ridge regression baseline on the same tabular features
+
+The chosen family is passed as the `--model_type` hyperparameter so the same
+script backs the training job regardless of which model the design document's
+comparison selects.
+"""
+
+import argparse
+import json
+import os
+from pathlib import Path
+
+import joblib
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+TARGET_COLUMN = 'Units Sold'
+GROUP_COLS = ['Store ID', 'Product ID']
+CATEGORICAL_COLS = ['Category', 'Region', 'Weather Condition', 'Seasonality'] + GROUP_COLS
+LAG_DAYS = [1, 7, 14, 30]
+ROLLING_WINDOWS = [7, 14, 30]
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_type', type=str, default='lstm', choices=['lstm', 'ridge'])
+    parser.add_argument('--sequence_length', type=int, default=30)
+    parser.add_argument('--lstm_units_1', type=int, default=64)
+    parser.add_argument('--lstm_units_2', type=int, default=32)
+    parser.add_argument('--dropout', type=float, default=0.2)
+    parser.add_argument('--learning_rate', type=float, default=0.001)
+    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--ridge_alpha', type=float, default=1.0)
+    parser.add_argument('--random_state', type=int, default=42)
+
+    parser.add_argument('--train', type=str, default=os.environ.get('SM_CHANNEL_TRAIN'))
+    parser.add_argument('--validation', type=str, default=os.environ.get('SM_CHANNEL_VALIDATION'))
+    parser.add_argument('--model_dir', type=str, default=os.environ.get('SM_MODEL_DIR'))
+    parser.add_argument('--output_dir', type=str, default=os.environ.get('SM_OUTPUT_DATA_DIR', '/opt/ml/output/data'))
+    return parser.parse_args()
+
+
+def read_channel(channel: str) -> pd.DataFrame:
+    files = sorted(Path(channel).glob('*.parquet'))
+    if not files:
+        raise FileNotFoundError(f'No Parquet input files in {channel}')
+    return pd.concat([pd.read_parquet(path) for path in files], ignore_index=True)
+
+
+def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Mirror src/feature_engineering/feature_engineering.py without importing it."""
+    df = df.sort_values(GROUP_COLS + ['Date']).reset_index(drop=True)
+    dt = pd.to_datetime(df['Date']).dt
+    df['day_of_week'] = dt.dayofweek
+    df['month'] = dt.month
+    df['quarter'] = dt.quarter
+    df['year'] = dt.year
+    df['week_of_year'] = dt.isocalendar().week.astype(int)
+    df['is_weekend'] = (dt.dayofweek >= 5).astype(int)
+
+    grouped_target = df.groupby(GROUP_COLS)[TARGET_COLUMN]
+    for lag in LAG_DAYS:
+        df[f'{TARGET_COLUMN}_lag_{lag}'] = grouped_target.shift(lag)
+    shifted = grouped_target.shift(1)
+    for window in ROLLING_WINDOWS:
+        rolling = shifted.groupby([df[c] for c in GROUP_COLS]).rolling(window=window, min_periods=window)
+        df[f'{TARGET_COLUMN}_rolling_mean_{window}'] = rolling.mean().reset_index(level=list(range(len(GROUP_COLS))), drop=True)
+        df[f'{TARGET_COLUMN}_rolling_std_{window}'] = rolling.std().reset_index(level=list(range(len(GROUP_COLS))), drop=True)
+
+    feature_cols = ['Price', 'Discount', 'Competitor Pricing', 'Holiday/Promotion',
+                    'day_of_week', 'month', 'quarter', 'year', 'week_of_year', 'is_weekend']
+    feature_cols += [f'{TARGET_COLUMN}_lag_{lag}' for lag in LAG_DAYS]
+    feature_cols += [f'{TARGET_COLUMN}_rolling_mean_{w}' for w in ROLLING_WINDOWS]
+    feature_cols += [f'{TARGET_COLUMN}_rolling_std_{w}' for w in ROLLING_WINDOWS]
+    df = df.dropna(subset=feature_cols).reset_index(drop=True)
+    return df, feature_cols
+
+
+def build_sequences(df, feature_cols, sequence_length):
+    X_list, y_list = [], []
+    feature_values = df[feature_cols].to_numpy(dtype=np.float32)
+    target_values = df[TARGET_COLUMN].to_numpy(dtype=np.float32)
+    for _, idx in df.groupby(GROUP_COLS, sort=False).indices.items():
+        idx = np.sort(idx)
+        if len(idx) <= sequence_length:
+            continue
+        gf, gt = feature_values[idx], target_values[idx]
+        for start in range(len(idx) - sequence_length):
+            end = start + sequence_length
+            X_list.append(gf[start:end])
+            y_list.append(gt[end])
+    return np.stack(X_list), np.array(y_list, dtype=np.float32)
+
+
+def evaluate(y_true, y_pred) -> dict:
+    y_true, y_pred = np.asarray(y_true, dtype=float), np.clip(np.asarray(y_pred, dtype=float), 0, None)
+    denom = np.sum(np.abs(y_true))
+    return {
+        'mae': float(mean_absolute_error(y_true, y_pred)),
+        'rmse': float(np.sqrt(mean_squared_error(y_true, y_pred))),
+        'wape': float(np.sum(np.abs(y_true - y_pred)) / denom) if denom else float('nan'),
+    }
+
+
+def train_ridge(train_df, val_df, feature_cols, args):
+    numeric_cols = [c for c in feature_cols if c not in CATEGORICAL_COLS]
+    preprocess = ColumnTransformer([
+        ('num', StandardScaler(), numeric_cols),
+        ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), CATEGORICAL_COLS),
+    ])
+    model = Pipeline([('preprocess', preprocess), ('regressor', Ridge(alpha=args.ridge_alpha, random_state=args.random_state))])
+    model.fit(train_df[numeric_cols + CATEGORICAL_COLS], train_df[TARGET_COLUMN])
+    val_pred = model.predict(val_df[numeric_cols + CATEGORICAL_COLS])
+    metrics = evaluate(val_df[TARGET_COLUMN], val_pred)
+    joblib.dump(model, os.path.join(os.environ.get('SM_MODEL_DIR', '.'), 'model.joblib'))
+    return metrics
+
+
+def train_lstm(train_df, val_df, feature_cols, args):
+    import tensorflow as tf
+    from tensorflow.keras import layers, models, optimizers, callbacks
+
+    X_train, y_train = build_sequences(train_df, feature_cols, args.sequence_length)
+    X_val, y_val = build_sequences(val_df, feature_cols, args.sequence_length)
+
+    scaler = StandardScaler().fit(X_train.reshape(-1, X_train.shape[-1]))
+    X_train_s = scaler.transform(X_train.reshape(-1, X_train.shape[-1])).reshape(X_train.shape).astype(np.float32)
+    X_val_s = scaler.transform(X_val.reshape(-1, X_val.shape[-1])).reshape(X_val.shape).astype(np.float32)
+
+    inputs = layers.Input(shape=(args.sequence_length, X_train.shape[-1]))
+    x = layers.LSTM(args.lstm_units_1, activation='relu', return_sequences=True)(inputs)
+    x = layers.Dropout(args.dropout)(x)
+    x = layers.LSTM(args.lstm_units_2, activation='relu')(x)
+    x = layers.Dropout(args.dropout)(x)
+    x = layers.Dense(32, activation='relu')(x)
+    outputs = layers.Dense(1)(x)
+    model = models.Model(inputs, outputs)
+    model.compile(optimizer=optimizers.Adam(learning_rate=args.learning_rate), loss='mse', metrics=['mae'])
+
+    early_stopping = callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+    model.fit(X_train_s, y_train, validation_data=(X_val_s, y_val), epochs=args.epochs,
+             batch_size=args.batch_size, callbacks=[early_stopping], verbose=2)
+
+    val_pred = model.predict(X_val_s, verbose=0).reshape(-1)
+    metrics = evaluate(y_val, val_pred)
+
+    model_dir = os.environ.get('SM_MODEL_DIR', '.')
+    model.save(os.path.join(model_dir, 'model.keras'))
+    joblib.dump(scaler, os.path.join(model_dir, 'sequence_scaler.joblib'))
+    return metrics
+
+
+def main():
+    args = parse_args()
+    train_df, feature_cols = engineer_features(read_channel(args.train))
+    val_df, _ = engineer_features(read_channel(args.validation))
+
+    if args.model_type == 'lstm':
+        metrics = train_lstm(train_df, val_df, feature_cols, args)
+    else:
+        metrics = train_ridge(train_df, val_df, feature_cols, args)
+
+    print(f"Validation metrics: {metrics}")
+    os.makedirs(args.output_dir, exist_ok=True)
+    with open(os.path.join(args.output_dir, 'metrics.json'), 'w') as f:
+        json.dump({'model_type': args.model_type, **metrics}, f, indent=2)
+
+
+if __name__ == '__main__':
+    main()
