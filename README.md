@@ -453,6 +453,22 @@ python -m src.aws.sagemaker.infrastructure_monitoring
 
 ---
 
+## Testing the Model / Endpoint
+
+`src/ui/app.py` is a small Streamlit app for interactively testing a forecast without writing code — useful for sanity-checking a trained model and for demonstrating endpoint invocation.
+
+```bash
+streamlit run src/ui/app.py
+```
+
+It supports two modes, selectable in the sidebar:
+- **Local model**: loads `models/model.keras` + `models/sequence_scaler.joblib` directly and predicts in-process (no AWS needed).
+- **SageMaker endpoint**: sends the same feature window as a JSON payload to a deployed real-time endpoint (`python -m src.aws.sagemaker.deployment` must have been run first) and shows the raw request/response.
+
+Pick a Store ID / Product ID / as-of date, optionally override Price/Discount/Holiday-Promotion for a what-if scenario, and click "Generate forecast". The app also plots recent actual demand for context.
+
+---
+
 ## Usage Examples
 
 ```python
