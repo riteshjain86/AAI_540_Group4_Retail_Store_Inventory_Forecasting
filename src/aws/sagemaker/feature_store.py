@@ -5,6 +5,7 @@ SageMaker Feature Store implementation for the retail store inventory dataset.
 import io
 import logging
 import os
+import re
 import time
 from urllib.parse import urlparse
 
@@ -160,6 +161,27 @@ class RetailInventoryFeatureStore:
         logger.info("Data ingestion completed")
 
     @staticmethod
+    def _sanitize_feature_names(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Rename columns to satisfy Feature Store's feature-name constraints
+        (alphanumeric characters, hyphens, and underscores only; must start
+        with a letter or number). The raw dataset's column headers contain
+        spaces and a slash (e.g. "Store ID", "Holiday/Promotion"), which are
+        rejected by the CreateFeatureGroup API.
+
+        Args:
+            df: DataFrame whose columns should be sanitized
+
+        Returns:
+            DataFrame with Feature Store-safe column names
+        """
+        def sanitize(name: str) -> str:
+            cleaned = re.sub(r'[^A-Za-z0-9_-]+', '_', name.strip())
+            return cleaned.strip('_-') or 'feature'
+
+        return df.rename(columns={col: sanitize(col) for col in df.columns})
+
+    @staticmethod
     def _add_record_identifiers(df: pd.DataFrame) -> pd.DataFrame:
         """
         Add the record_id (composite key) and event_time (Unix seconds) columns
@@ -199,6 +221,7 @@ class RetailInventoryFeatureStore:
             raise ValueError('Raw S3 dataset is empty')
 
         df = self._add_record_identifiers(df)
+        df = self._sanitize_feature_names(df)
         logger.info(f'Loaded {len(df)} rows from {uri}')
 
         logger.info("Creating raw feature group...")
