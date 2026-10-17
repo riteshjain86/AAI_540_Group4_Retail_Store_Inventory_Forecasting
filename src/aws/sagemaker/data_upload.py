@@ -126,7 +126,7 @@ class S3DataUploader:
             f"{self.base_prefix}/raw/",
             f"{self.base_prefix}/processed/",
             f"{self.base_prefix}/train/",
-            f"{self.base_prefix}/validation/",
+            f"{self.base_prefix}/val/",
             f"{self.base_prefix}/test/",
             f"{self.base_prefix}/models/",
             f"{self.base_prefix}/predictions/",
