@@ -120,7 +120,7 @@ def main():
     trainer = SageMakerTrainingJob()
 
     train_s3_uri = f"s3://{trainer.bucket_name}/{trainer.base_prefix}/train/train.parquet"
-    val_s3_uri = f"s3://{trainer.bucket_name}/{trainer.base_prefix}/validation/val.parquet"
+    val_s3_uri = f"s3://{trainer.bucket_name}/{trainer.base_prefix}/val/val.parquet"
 
     estimator = trainer.launch_training_job(train_s3_uri, val_s3_uri)
     print(f"Training job launched: {estimator._current_job_name}")
