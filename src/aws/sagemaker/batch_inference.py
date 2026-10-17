@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 import boto3
+import pandas as pd
 import sagemaker
 from dotenv import load_dotenv
 from sagemaker.sklearn.model import SKLearnModel
@@ -109,6 +110,37 @@ class SageMakerBatchInference:
         logger.info(f"Batch transform job {job_name} started")
         return job_name
 
+    def prepare_batch_input(self, data_path: str = 'data/processed/test.parquet',
+                            local_csv: str = 'batch_input.csv') -> str:
+        """
+        Engineer features from a Parquet split and upload them as the
+        header-less CSV batch-transform input expected by
+        scripts/batch_transform.py's classical (tabular) model.
+
+        Args:
+            data_path: Local path to a raw Parquet split (e.g. the test set)
+            local_csv: Local path to write the intermediate feature CSV to
+
+        Returns:
+            S3 URI (prefix) where the batch input file was uploaded
+        """
+        import sys
+        sys.path.insert(0, str(self.scripts_dir))
+        from train import engineer_features, CATEGORICAL_COLS
+
+        df = pd.read_parquet(data_path)
+        engineered, feature_cols = engineer_features(df)
+        numeric_cols = [c for c in feature_cols if c not in CATEGORICAL_COLS]
+        engineered[numeric_cols + CATEGORICAL_COLS].to_csv(local_csv, index=False, header=False)
+
+        s3_prefix = f"{self.base_prefix}/predictions/batch-input"
+        s3_key = f"{s3_prefix}/{Path(local_csv).name}"
+        boto3.client('s3', region_name=self.region).upload_file(local_csv, self.bucket_name, s3_key)
+
+        s3_uri = f"s3://{self.bucket_name}/{s3_prefix}/"
+        logger.info(f"Uploaded batch input ({len(engineered)} rows) to {s3_uri}")
+        return s3_uri
+
     def get_transform_job_status(self, job_name: str) -> dict:
         """
         Get the status of a transform job.
@@ -157,17 +189,33 @@ class SageMakerBatchInference:
 
 
 def main():
-    """Main function to run batch inference."""
+    """Main function to run batch inference.
+
+    Requires the TRAINING_JOB_NAME environment variable to be set to a
+    SageMaker training job that produced a classical (tabular) model
+    artifact, e.g. one launched with hyperparameters={'model_type': 'ridge'}
+    (see training.py). Batch transform does not support the sequence
+    (LSTM/Transformer) models; use deployment.py's real-time endpoint for
+    those instead.
+    """
+    training_job_name = os.environ.get('TRAINING_JOB_NAME')
+    if not training_job_name:
+        raise ValueError(
+            "Set TRAINING_JOB_NAME to the SageMaker training job whose classical "
+            "model.tar.gz should be used for batch inference."
+        )
+
     batch_inference = SageMakerBatchInference()
 
-    model_s3_uri = f"s3://{batch_inference.bucket_name}/{batch_inference.base_prefix}/models/model.tar.gz"
-    input_s3_uri = f"s3://{batch_inference.bucket_name}/{batch_inference.base_prefix}/predictions/batch-input/"
+    model_s3_uri = (f"s3://{batch_inference.bucket_name}/{batch_inference.base_prefix}/"
+                    f"models/{training_job_name}/output/model.tar.gz")
+    input_s3_uri = batch_inference.prepare_batch_input()
 
     transformer = batch_inference.create_transformer(model_s3_uri)
-    job_name = batch_inference.run_batch_transform(transformer, input_s3_uri)
-    print(f"Batch transform job started: {job_name}")
+    transform_job_name = batch_inference.run_batch_transform(transformer, input_s3_uri)
+    print(f"Batch transform job started: {transform_job_name}")
 
-    status_info = batch_inference.wait_for_transform_job(job_name)
+    status_info = batch_inference.wait_for_transform_job(transform_job_name)
     print(f"Transform job completed: {status_info}")
 
 
