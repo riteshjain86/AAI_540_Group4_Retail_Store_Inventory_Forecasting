@@ -9,6 +9,7 @@ demand days in retail data), and sMAPE as a supplementary metric.
 from typing import Dict
 
 import numpy as np
+import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 
@@ -54,7 +55,7 @@ def evaluate_forecast(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float
     }
 
 
-def evaluate_by_segment(y_true, y_pred, segment: np.ndarray) -> "pd.DataFrame":
+def evaluate_by_segment(y_true, y_pred, segment: np.ndarray) -> pd.DataFrame:
     """
     Break down WAPE and MAE by a segment column (e.g. Category or Store ID).
 
@@ -69,8 +70,6 @@ def evaluate_by_segment(y_true, y_pred, segment: np.ndarray) -> "pd.DataFrame":
     Returns:
         DataFrame with one row per segment and its mae/wape/n_samples
     """
-    import pandas as pd
-
     df = pd.DataFrame({'y_true': np.asarray(y_true, dtype=float),
                        'y_pred': np.asarray(y_pred, dtype=float),
                        'segment': segment})
