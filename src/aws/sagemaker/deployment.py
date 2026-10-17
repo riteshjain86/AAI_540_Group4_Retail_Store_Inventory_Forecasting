@@ -14,7 +14,7 @@ import boto3
 import sagemaker
 from dotenv import load_dotenv
 from sagemaker.model_monitor import DataCaptureConfig
-from sagemaker.tensorflow import TensorFlowModel
+from sagemaker.sklearn.model import SKLearnModel
 
 import logging
 
@@ -61,12 +61,20 @@ class SageMakerDeployment:
         if endpoint_name is None:
             endpoint_name = f"retail-forecasting-endpoint-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
-        model = TensorFlowModel(
+        # scripts/inference.py implements the generic SageMaker inference-toolkit
+        # API (model_fn/input_fn/predict_fn/output_fn), which the TensorFlow
+        # Serving container (sagemaker.tensorflow.TensorFlowModel) does not call
+        # and cannot load (it requires a TF SavedModel directory, not the
+        # model.keras file this project's training saves). SKLearnModel uses the
+        # inference-toolkit container, matching inference.py, and installs
+        # TensorFlow via scripts/requirements.txt to load the Keras model.
+        model = SKLearnModel(
             model_data=model_s3_uri,
             role=self.role_arn,
             entry_point='inference.py',
             source_dir=str(self.scripts_dir),
-            framework_version='2.13',
+            framework_version='1.2-1',
+            py_version='py3',
             sagemaker_session=self.sagemaker_session,
         )
 
