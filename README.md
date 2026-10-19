@@ -203,18 +203,33 @@ AAI_540_Group4_Retail_Store_Inventory_Forecasting/
 │           ├── deployment.py           # optional real-time endpoint
 │           ├── batch_inference.py      # batch transform (primary inference pattern)
 │           ├── model_registry.py       # Model Registry
+│           ├── pipeline.py             # SageMaker Pipeline (CI/CD DAG): preprocess/train/evaluate/quality-gate/register
 │           ├── monitoring.py           # Model Monitor + forecast-accuracy CloudWatch metrics
+│           ├── monitoring_reports.py   # model-quality + data-quality reports (reports/monitoring/)
 │           ├── infrastructure_monitoring.py  # CloudWatch dashboards
 │           ├── rollback.py             # rollback utilities
+│           ├── pipeline_scripts/
+│           │   ├── preprocess.py       # Pipeline's Processing step entry point
+│           │   ├── evaluate.py         # Pipeline's EvaluateModel step entry point
+│           │   └── requirements.txt
 │           └── scripts/
 │               ├── train.py            # SageMaker training entry point
 │               ├── inference.py        # real-time endpoint entry point
-│               └── batch_transform.py  # batch transform entry point
+│               ├── batch_transform.py  # batch transform entry point
+│               └── requirements.txt
 ├── models/                        # model.joblib or model.keras + model_metadata.json (generated)
 ├── mlflow.db                       # MLflow tracking store (generated)
+├── docs/
+│   ├── OPERATIONS_RUNBOOK.md       # step-by-step: pipeline, registry, monitoring, dashboard
+│   ├── architecture_diagram.png
+│   ├── DESIGN_DOCUMENT.md          # as-built ML Design Document (+ DESIGN_DOCUMENT.docx)
+│   └── VIDEO_SCRIPT.md             # demo video script with exact AWS console click paths
 ├── tests/
 │   ├── test_data_preprocessing.py
-│   └── test_model_training.py
+│   ├── test_model_training.py
+│   └── aws/
+│       ├── test_pipeline.py
+│       └── test_monitoring.py
 ├── .github/workflows/ci-cd.yml
 ├── requirements.txt
 ├── Dockerfile
@@ -261,11 +276,18 @@ AAI_540_Group4_Retail_Store_Inventory_Forecasting/
 
 5. **Dataset**: `data/raw/retail_store_inventory.csv` is already committed (synthetic, ~6 MB). If it's missing, download it from [Kaggle](https://www.kaggle.com/datasets/anirudhchauhan/retail-store-inventory-forecasting-dataset) and place it at that path.
 
-### Operations runbook
+### Project documentation
 
-See [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md) for the SageMaker Pipeline CI/CD DAG
-(`python -m src.aws.sagemaker.pipeline`), the model- and data-quality monitoring reports
-(`python -m src.aws.sagemaker.monitoring_reports`) and the CloudWatch infrastructure dashboard.
+- [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md) — step-by-step for the SageMaker Pipeline CI/CD DAG
+  (`python -m src.aws.sagemaker.pipeline`), the model- and data-quality monitoring reports
+  (`python -m src.aws.sagemaker.monitoring_reports`), and the CloudWatch infrastructure dashboard, with where to
+  inspect each result in Studio/the console.
+- [docs/DESIGN_DOCUMENT.md](docs/DESIGN_DOCUMENT.md) (also provided as `DESIGN_DOCUMENT.docx`) — the full
+  as-built ML System Design Document: business problem, data/EDA findings, model comparison and test metrics,
+  MLOps/CI-CD architecture, monitoring, security checklist, and an Engineering Challenges & Lessons Learned
+  section documenting the real bugs hit and fixed during development.
+- [docs/VIDEO_SCRIPT.md](docs/VIDEO_SCRIPT.md) — demo video script with timed segments and exact AWS console
+  click paths for a walkthrough recording.
 
 ### Running on AWS SageMaker AI
 
@@ -425,12 +447,13 @@ This project includes AWS SageMaker integration per the ML System Design Documen
 1. **Data Upload to S3** — raw dataset and processed train/val/test splits
 2. **Feature Store** — a Feature Group keyed on a composite `record_id` (Date # Store ID # Product ID), since the dataset's natural key isn't a single column
 3. **Training Jobs** — managed `TensorFlow` estimator training job (LSTM by default; `--model_type ridge` trains the classical baseline with the same entry point)
-4. **Model Registry** — model package group `retail-inventory-forecasting-models`
-5. **Batch Inference** — the primary inference pattern; batch transform job over a prepared feature file
-6. **Model Deployment** — optional real-time endpoint for ad hoc scoring
-7. **Model Monitoring** — SageMaker Model Monitor data-quality baseline, plus custom CloudWatch metrics (MAE/RMSE/WAPE) published once ground truth is available
-8. **Infrastructure Monitoring** — CloudWatch dashboards for training jobs, endpoint, batch transform, S3, and Feature Store
-9. **Rollback** — revert an endpoint to a previous approved model package
+4. **SageMaker Pipeline (CI/CD DAG)** — `retail-forecasting-pipeline`: `Preprocess → TrainModel → EvaluateModel → CheckQualityGate → RegisterModel | QualityGateFailed`. The quality gate requires test WAPE at or below a configurable threshold (default 0.70) *and* a minimum relative improvement over a seasonal-naive baseline (default 10%) before a model package is ever registered; a failing run stops at `QualityGateFailed` instead of silently registering. See [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md) for a passing-vs-failing demonstration.
+5. **Model Registry** — model package group `retail-inventory-forecasting-models`; pipeline-registered packages carry `evaluation.json` as model metrics and start `PendingManualApproval`
+6. **Batch Inference** — the primary inference pattern; batch transform job over a prepared feature file
+7. **Model Deployment** — optional real-time endpoint for ad hoc scoring
+8. **Model Monitoring** — SageMaker Model Monitor data-quality baseline/drift analysis with a PSI drift table, and a model-quality report joining batch predictions against actuals (MAE/RMSE/WAPE overall and per store/category/region), both via `monitoring_reports.py`; custom CloudWatch metrics published to `RetailForecasting/ModelQuality`
+9. **Infrastructure Monitoring** — a CloudWatch dashboard (`ml-system-monitoring`) built from `SEARCH()` metric-math expressions tracking pipeline executions, per-job CPU/memory, Feature Store calls, S3 size, forecast accuracy, and the optional endpoint — new jobs appear automatically without editing the dashboard
+10. **Rollback** — revert an endpoint to a previous approved model package
 
 ### Prerequisites
 
@@ -444,6 +467,8 @@ This project includes AWS SageMaker integration per the ML System Design Documen
 
 ### AWS SageMaker Workflow
 
+**Imperative path** (run each AWS component as a standalone script/job — useful for development and debugging one step at a time):
+
 ```bash
 python validate_aws_setup.py
 python -m src.aws.sagemaker.data_upload
@@ -453,9 +478,25 @@ TRAINING_JOB_NAME=<job-name> python -m src.aws.sagemaker.model_registry
 python -m src.aws.sagemaker.batch_inference
 python -m src.aws.sagemaker.monitoring
 python -m src.aws.sagemaker.infrastructure_monitoring
+python -m src.aws.sagemaker.monitoring_reports all
 ```
 
-**Note:** this project pins `sagemaker>=2.190.0,<3.0.0` because the SageMaker AI lab environment this was developed against does not support the breaking changes introduced in SageMaker Python SDK v3.
+**Managed Pipeline path** (the actual CI/CD DAG — this is what populates the **Pipelines** tab in
+SageMaker Studio; the imperative commands above create raw Training/Transform/Processing jobs
+instead, which show up under their own respective tabs, *not* under Pipelines):
+
+```bash
+python -m src.aws.sagemaker.pipeline upsert                                    # registers the pipeline definition
+python -m src.aws.sagemaker.pipeline run --display-name gate-pass --wait       # passes the quality gate, registers a model
+python -m src.aws.sagemaker.pipeline run --display-name gate-fail --max-wape 0.50 --wait  # intentionally fails the gate
+python -m src.aws.sagemaker.pipeline status
+```
+
+See [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md) for the full step-by-step (including
+where to inspect each result in Studio/the console) and [docs/VIDEO_SCRIPT.md](docs/VIDEO_SCRIPT.md)
+for exact click paths through the AWS console for a demo recording.
+
+**Note:** this project pins `sagemaker>=2.190.0,<3.0.0` because the SageMaker AI lab environment this was developed against does not support the breaking changes introduced in SageMaker Python SDK v3. In practice, an AWS Academy Learner Lab session restart can still surface a fresh Studio kernel whose base environment provides SageMaker functionality via AWS's newer modularized SDK components rather than this pinned package — if you hit `ModuleNotFoundError`/`AttributeError`s referencing `sagemaker.model_monitor` or `sagemaker.Session` that weren't there before, run `pip install "sagemaker>=2.190.0,<3.0.0"` again in that kernel.
 
 ---
 
