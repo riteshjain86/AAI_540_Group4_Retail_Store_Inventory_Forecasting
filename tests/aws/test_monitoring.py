@@ -56,6 +56,13 @@ def test_violation_summary_and_column_sanitizing():
     assert mr.sanitize_column('Units Sold_lag_7') == 'Units_Sold_lag_7'
 
 
+def test_parse_batch_output_handles_csv_and_json():
+    from src.aws.sagemaker import monitoring_reports as mr
+
+    assert list(mr.MonitoringReports._parse_batch_output('1.5\n2.5\n3.5')) == [1.5, 2.5, 3.5]
+    assert mr.MonitoringReports._parse_batch_output('{"predictions": [1.5, 2.5, 3.5]}') == [1.5, 2.5, 3.5]
+
+
 def test_dashboard_uses_real_dimensions(monkeypatch):
     from src.aws.sagemaker import infrastructure_monitoring as im
 
@@ -68,3 +75,16 @@ def test_dashboard_uses_real_dimensions(monkeypatch):
     assert 'sagemaker-us-east-1-123456789012' in text
     for w in body['widgets']:
         assert w['x'] + w['width'] <= 24
+
+
+def test_search_metrics_are_wrapped_as_arrays(monkeypatch):
+    """Every entry in a CloudWatch widget's 'metrics' list must itself be an
+    array (classic tuple, or a single-element array wrapping a metric-math
+    expression object) - a bare dict/object fails PutDashboard validation."""
+    from src.aws.sagemaker import infrastructure_monitoring as im
+
+    monkeypatch.setattr(im.boto3, 'client', lambda *a, **k: SimpleNamespace())
+    body = im.InfrastructureMonitoring().build_comprehensive_dashboard('sagemaker-us-east-1-123456789012')
+    for w in body['widgets']:
+        for m in w.get('properties', {}).get('metrics', []):
+            assert isinstance(m, list), f"metrics entry must be an array, got {type(m)}: {m}"
