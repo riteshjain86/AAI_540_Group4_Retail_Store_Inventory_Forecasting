@@ -1,2 +1,8 @@
 pyarrow==14.0.2
 tensorflow==2.15.0
+# Pin protobuf to the version compatible with both TensorFlow 2.15 (needs
+# >=3.20.3) and the SageMaker container's own sagemaker_containers package
+# (needs <=3.20.3), which TensorFlow would otherwise upgrade at container
+# startup and break (the built-in serving stack fails to boot with
+# "TypeError: Descriptors cannot be created directly").
+protobuf==3.20.3
