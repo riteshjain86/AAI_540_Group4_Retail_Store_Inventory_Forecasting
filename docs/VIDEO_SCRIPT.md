@@ -191,6 +191,37 @@ themselves are naturally different ranges. That's exactly the kind of signal thi
 supposed to catch, and it's reassuring that it didn't flag anything on the features that actually
 drive the forecast."
 
+### 5f. (Optional) LSTM real-time endpoint — "here's the other deployment pattern" (90s)
+
+Batch transform is the primary pattern (shown in 5d), but the project also supports a real-time
+endpoint as an optional extension. This segment only works live if you deploy the endpoint
+*immediately before* recording this part, since it costs money per hour it's running — see the
+Recording checklist. Deployment and invocation are run from the terminal (matching every other AWS
+component in this project — this is not done in a notebook; see Group 5's reference repo, which
+uses the identical CLI pattern), but the **proof that it's real** is shown live in the console.
+
+**Before recording:** run the deploy step from the terminal in the background while you set up the
+camera, since provisioning takes 5-8 minutes. Keep the invoke+delete script ready to paste
+immediately after you finish this segment on camera, so the endpoint doesn't sit idle.
+
+**Click path:**
+1. SageMaker Studio (or console) → **Inference** → **Endpoints** → find your endpoint
+   (`retail-forecasting-endpoint-<timestamp>`) → point at status **InService**.
+2. Switch to the terminal tab where you already ran the invoke script → show the printed
+   `Model prediction: ...` line next to the `Ground truth: 40` comment.
+3. (Optional) Endpoint detail page → **Data capture** tab → show that request/response capture is
+   enabled, writing to `s3://.../monitoring/data-capture/`.
+4. Switch back to the terminal and run the delete command live, on camera, so the recording itself
+   is evidence the endpoint didn't get left running.
+
+**Say (plain language):** "Separately from batch transform, the project also supports deploying the
+same LSTM model behind a real-time endpoint for on-demand scoring. Here it is, status InService in
+the console. I fed it a real 30-day window of actual historical data for one store and product, and
+here's the terminal output — the model's prediction next to the real value that was actually sold
+the next day, so you can see the mechanism genuinely works end to end, not just that it was coded.
+Real-time endpoints bill per hour regardless of how many requests you send, so the very next thing I
+do, right now on camera, is delete it."
+
 ---
 
 ## 6. CI/CD (45s)
@@ -246,7 +277,12 @@ model-accuracy monitoring. Thanks for watching."
       ```
       Confirm both executions show up under Studio → Pipelines → `retail-forecasting-pipeline` →
       Executions before you start recording.
-- [ ] SageMaker Studio open with Pipelines, Models, and Feature Store tabs ready
+- [ ] **(If doing the optional 5f segment) Deploy the LSTM endpoint 5-10 minutes before you start
+      recording** so it's already `InService` by the time you reach that segment - don't make the
+      camera wait on live provisioning. Have the invoke+delete script ready in a terminal tab, not
+      yet run, so you can execute it live on camera during 5f and the recording itself proves the
+      endpoint got deleted right after.
+- [ ] SageMaker Studio open with Pipelines, Models, Feature Store, and Endpoints tabs ready
 - [ ] CloudWatch dashboard `ml-system-monitoring` loaded with a reasonable time range set
 - [ ] Both pipeline executions (`gate-pass`, `gate-fail`) already completed so you're not waiting live
 - [ ] `reports/monitoring/model_quality.md` and `data_quality.md` open in an editor tab
