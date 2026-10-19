@@ -1,242 +1,123 @@
 name: MLOps CI/CD Pipeline
 
+# Every push / PR: lint, unit tests, Docker build (no registry push).
+# Manual "Run workflow": additionally runs the SageMaker Pipeline DAG
+# (Preprocess -> Train -> Evaluate -> WAPE quality gate -> Register | Fail)
+# and fails this workflow when the quality gate fails.
+
 on:
   push:
-    branches: [ main, ved-development ]
+    branches: [ main, ved-development, ved-development-2 ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+    inputs:
+      max_test_wape:
+        description: 'Quality gate: maximum test WAPE (default 0.70; e.g. 0.50 to demo a failing gate)'
+        required: false
+        default: '0.70'
+      min_wape_improvement:
+        description: 'Quality gate: minimum WAPE improvement vs seasonal-naive (default 0.10)'
+        required: false
+        default: '0.10'
 
 env:
   AWS_REGION: us-east-1
   PYTHON_VERSION: '3.10'
 
 jobs:
-  # Job 1: Code Quality and Testing
   test:
-    name: Code Quality and Tests
+    name: Lint and unit tests
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
+    - uses: actions/setup-python@v5
       with:
         python-version: ${{ env.PYTHON_VERSION }}
+        cache: pip
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Run linting
+    - name: Lint
       run: |
-        pip install flake8
-        flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 src/ tests/ --count --select=E9,F63,F7,F82 --show-source --statistics
         flake8 src/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
-    - name: Run unit tests
-      run: |
-        pytest tests/ -v --cov=src --cov-report=xml
+    - name: Unit tests
+      run: pytest tests/ -v --cov=src --cov-report=xml
 
-    - name: Upload coverage reports
-      uses: codecov/codecov-action@v3
+    - name: Upload coverage report
+      uses: actions/upload-artifact@v4
       with:
-        file: ./coverage.xml
-        flags: unittests
-        name: codecov-umbrella
+        name: coverage
+        path: coverage.xml
 
-  # Job 2: Build and Push Docker Image
   build:
-    name: Build Docker Image
+    name: Build Docker image
     runs-on: ubuntu-latest
     needs: test
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Log in to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKER_USERNAME }}
-        password: ${{ secrets.DOCKER_PASSWORD }}
-
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v5
+    - uses: actions/checkout@v4
+    - uses: docker/setup-buildx-action@v3
+    - name: Build image (no push)
+      uses: docker/build-push-action@v6
       with:
         context: .
-        push: true
-        tags: |
-          ${{ secrets.DOCKER_USERNAME }}/retail-inventory-forecasting:${{ github.sha }}
-          ${{ secrets.DOCKER_USERNAME }}/retail-inventory-forecasting:latest
-        cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/retail-inventory-forecasting:buildcache
-        cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/retail-inventory-forecasting:buildcache,mode=max
+        push: false
+        tags: retail-inventory-forecasting:${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
 
-  # Job 3: Deploy to AWS SageMaker (on main branch only)
-  deploy:
-    name: Deploy to SageMaker
+  sagemaker-pipeline:
+    name: SageMaker Pipeline (train, evaluate, gate, register)
     runs-on: ubuntu-latest
     needs: build
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
-
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
-
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-
-    - name: Train and validate locally (quality gate)
-      run: |
-        python -m src.pipelines.training_pipeline
-
-    - name: Upload data and processed splits to S3
-      env:
-        AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-        AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-      run: |
-        python -m src.aws.sagemaker.data_upload
-
-    - name: Create Feature Store
-      env:
-        AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-        AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-      run: |
-        python -m src.aws.sagemaker.feature_store
-
-    - name: Run SageMaker training job
-      env:
-        AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-        AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-      run: |
-        python -m src.aws.sagemaker.training
-
-    - name: Register model in Model Registry
-      env:
-        AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-        AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-      run: |
-        python -m src.aws.sagemaker.model_registry
-
-    - name: Run batch inference (primary deployment pattern)
-      env:
-        AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-        AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-      run: |
-        python -m src.aws.sagemaker.batch_inference
-
-    - name: Set up model monitoring
-      env:
-        AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-        AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-      run: |
-        python -m src.aws.sagemaker.monitoring
-
-    - name: Create infrastructure monitoring dashboards
-      env:
-        AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-        AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-      run: |
-        python -m src.aws.sagemaker.infrastructure_monitoring
-
-  # Job 4: Rollback on Failure
-  rollback:
-    name: Rollback on Failure
-    runs-on: ubuntu-latest
-    needs: deploy
-    if: failure()
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
-
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
-
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-
-    - name: Rollback to previous approved model version
-      env:
-        AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-        AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-      run: |
-        python -m src.aws.sagemaker.rollback
-      continue-on-error: true
-
-    - name: Notify team of failure
-      uses: actions/github-script@v7
-      with:
-        script: |
-          github.rest.issues.create({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            title: 'Deployment Failed - Rollback Executed',
-            body: 'Deployment to SageMaker failed. Automatic rollback has been initiated. Please check the logs for details.'
-          })
-
-  # Job 5: Batch Inference (manual trigger, e.g. a scheduled re-forecast)
-  batch-inference:
-    name: Batch Inference Job
-    runs-on: ubuntu-latest
-    needs: deploy
     if: github.event_name == 'workflow_dispatch'
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
+    - name: Check AWS credentials are configured
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      run: |
+        missing=""
+        for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_ROLE_ARN; do
+          [ -z "${!name}" ] && missing="$missing $name"
+        done
+        if [ -n "$missing" ]; then
+          echo "::error::Missing repository secrets:$missing (AWS_SESSION_TOKEN is also required for Learner Lab credentials)"
+          exit 1
+        fi
+
+    - uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
+    - uses: actions/setup-python@v5
       with:
         python-version: ${{ env.PYTHON_VERSION }}
+        cache: pip
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Run batch inference
+    - name: Run pipeline and wait for the quality gate
       env:
-        AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
         AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+        SAGEMAKER_SUPPRESS_V2_WARNING: '1'
       run: |
-        python -m src.aws.sagemaker.batch_inference
+        python -m src.aws.sagemaker.pipeline run --wait \
+          --max-wape "${{ inputs.max_test_wape }}" \
+          --min-improvement "${{ inputs.min_wape_improvement }}" \
+          --display-name "github-${{ github.run_number }}"

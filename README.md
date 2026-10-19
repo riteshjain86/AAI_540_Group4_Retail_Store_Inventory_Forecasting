@@ -261,6 +261,12 @@ AAI_540_Group4_Retail_Store_Inventory_Forecasting/
 
 5. **Dataset**: `data/raw/retail_store_inventory.csv` is already committed (synthetic, ~6 MB). If it's missing, download it from [Kaggle](https://www.kaggle.com/datasets/anirudhchauhan/retail-store-inventory-forecasting-dataset) and place it at that path.
 
+### Operational validation (Deliverable 2)
+
+See [docs/VIDEO_DEMO_RUNBOOK.md](docs/VIDEO_DEMO_RUNBOOK.md) for the SageMaker Pipeline CI/CD DAG
+(`python -m src.aws.sagemaker.pipeline`), the model- and data-quality monitoring reports
+(`python -m src.aws.sagemaker.monitoring_reports`) and the CloudWatch infrastructure dashboard.
+
 ### Running on AWS SageMaker AI
 
 This project targets **SageMaker Python SDK v2** (pinned in `requirements.txt` as `sagemaker>=2.190.0,<3.0.0`), since the SDK v3 made breaking API changes to `FeatureGroup`, estimators and models that this project's `src/aws/sagemaker/` modules rely on. If you're working in SageMaker Studio / Studio Lab:
