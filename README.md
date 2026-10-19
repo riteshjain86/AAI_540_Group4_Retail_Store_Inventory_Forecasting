@@ -320,6 +320,10 @@ Streamlit's Network and External URLs are not reachable from outside the Studio 
 Model comparison reads `mlflow.db` in the repository root (`mlflow.tracking_uri` in `config.yaml`); run
 `python -m src.pipelines.training_pipeline` from the repository root first.
 
+### Walkthrough
+
+![Dashboard walkthrough: model comparison, batch prediction review, forecast tester](docs/dashboard_walkthrough.webp)
+
 ---
 
 ## Pipeline Workflow
