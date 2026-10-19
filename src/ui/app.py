@@ -25,6 +25,12 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from src.ui.dashboard_data import (  # noqa: E402
+    load_batch_predictions,
+    load_loss_curves,
+    load_model_comparison,
+    predictions_vs_actuals,
+)
 from src.data_ingestion.data_ingestion import (
     load_data, validate_schema, DATE_COLUMN, STORE_COLUMN, PRODUCT_COLUMN, TARGET_COLUMN,
 )
@@ -39,6 +45,209 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_PATH = REPO_ROOT / 'data' / 'raw' / 'retail_store_inventory.csv'
 MODEL_DIR = REPO_ROOT / 'models'
 CONFIG_PATH = REPO_ROOT / 'config.yaml'
+DEFAULT_PREDICTIONS_SOURCE = (
+    's3://sagemaker-us-east-1-215595263640/'
+    'aai540/retail-forecasting/predictions/batch_input.csv.out'
+)
+
+
+def resolve_tracking_uri(tracking_uri: str) -> str:
+    if tracking_uri.startswith('sqlite:///'):
+        database_path = Path(tracking_uri.removeprefix('sqlite:///'))
+        if not database_path.is_absolute():
+            database_path = REPO_ROOT / database_path
+        return f'sqlite:///{database_path.resolve()}'
+    return tracking_uri
+
+
+@st.cache_data(ttl=30)
+def cached_load_model_comparison(tracking_uri: str, experiment_name: str):
+    return load_model_comparison(tracking_uri, experiment_name)
+
+
+@st.cache_data
+def cached_load_loss_curves(tracking_uri: str, run_id: str):
+    return load_loss_curves(tracking_uri, run_id)
+
+
+@st.cache_data
+def cached_load_batch_predictions(source: str):
+    return load_batch_predictions(source)
+
+
+@st.cache_data
+def cached_load_test_split(path: str):
+    return pd.read_parquet(path)
+
+
+def _selected_validation_model(summary: dict) -> str | None:
+    selected_model = summary.get('selected_model')
+    model_type = summary.get('model_type')
+    if selected_model == 'classical' and model_type:
+        return f'{model_type} (tuned)'
+    return selected_model
+
+
+def render_model_comparison(tracking_uri: str, experiment_name: str):
+    try:
+        models, summary = cached_load_model_comparison(tracking_uri, experiment_name)
+    except Exception as exc:
+        st.error(f'Could not load MLflow experiment: {exc}')
+        return
+
+    if summary is None:
+        st.info(
+            'No training pipeline run was found. From the repository root, run '
+            '`python -m src.pipelines.training_pipeline` to train and log a model.'
+        )
+        return
+
+    selected_model = _selected_validation_model(summary)
+    selected_label = selected_model or summary.get('selected_model') or 'Not recorded'
+    top_metrics = st.columns(2)
+    top_metrics[0].metric('Selected model', selected_label)
+    gate = summary.get('quality_gates_passed')
+    gate_label = 'Passed' if gate is True else ('Failed' if gate is False else 'Not recorded')
+    top_metrics[1].metric('Quality gates', gate_label)
+
+    metric_names = ('mae', 'rmse', 'wape', 'smape')
+    available_metrics = [
+        metric for metric in metric_names
+        if summary.get(f'test_{metric}') is not None
+    ]
+    if available_metrics:
+        metric_columns = st.columns(len(available_metrics))
+        for column, metric in zip(metric_columns, available_metrics):
+            value = summary[f'test_{metric}']
+            naive = summary.get(f'test_naive_{metric}')
+            value_format = '{:.3f}' if metric in ('wape', 'smape') else '{:.2f}'
+            delta = None if naive is None else f'{value - naive:+.3f} vs seasonal naive'
+            column.metric(
+                f'Test {metric.upper()}',
+                value_format.format(value),
+                delta=delta,
+                delta_color='inverse',
+            )
+
+    start_time = summary.get('start_time')
+    if start_time is not None:
+        formatted_time = pd.to_datetime(start_time, unit='ms', utc=True).strftime('%Y-%m-%d %H:%M UTC')
+        st.caption(f"Parent run `{summary['run_id']}` · started {formatted_time}")
+
+    if models.empty:
+        st.info('The latest training pipeline run has no nested model-validation runs.')
+        return
+
+    st.subheader('Validation comparison')
+    best_model = models.iloc[0]['model']
+
+    def highlight_models(row):
+        if row['model'] == selected_model:
+            return ['background-color: #e6f4ea'] * len(row)
+        if row['model'] == best_model:
+            return ['background-color: #fff4cc'] * len(row)
+        return [''] * len(row)
+
+    styled_models = models.style.apply(highlight_models, axis=1).format({
+        'val_mae': '{:.2f}',
+        'val_rmse': '{:.2f}',
+        'val_wape': '{:.4f}',
+        'val_smape': '{:.4f}',
+    }, na_rep='—')
+    st.dataframe(styled_models, use_container_width=True, hide_index=True)
+
+    st.subheader('Validation WAPE')
+    st.bar_chart(models.set_index('model')[['val_wape']])
+
+    for model in ('lstm', 'transformer'):
+        matching_runs = models[models['model'] == model]
+        if matching_runs.empty:
+            continue
+        losses = cached_load_loss_curves(tracking_uri, matching_runs.iloc[0]['run_id'])
+        if not losses.empty:
+            st.subheader(f'{model.upper()} training loss')
+            st.line_chart(losses.set_index('step')[['train_loss', 'val_loss']])
+
+
+def render_prediction_review():
+    st.image(str(REPO_ROOT / 'docs' / 'architecture_diagram.png'))
+    st.markdown(
+        '1. **Feature Store** provides the retail data.  \n'
+        '2. **SageMaker Pipeline** runs Preprocess → Train → Evaluate → WAPE gate.  \n'
+        '3. Passing models are added to the **Model Registry**.  \n'
+        '4. **Batch Transform** writes predictions to S3; an optional real-time endpoint '
+        'serves individual requests.'
+    )
+
+    st.subheader('Batch prediction review')
+    source_column, test_column = st.columns(2)
+    with source_column:
+        source = st.text_input(
+            'Predictions source (local path or S3 URI)',
+            value=DEFAULT_PREDICTIONS_SOURCE,
+            key='review_predictions_source',
+        )
+    with test_column:
+        test_path = st.text_input(
+            'Test split Parquet path',
+            value='data/processed/test.parquet',
+            key='review_test_split_path',
+        )
+
+    if st.button('Load predictions', key='review_load_predictions'):
+        try:
+            resolved_test_path = Path(test_path)
+            if not resolved_test_path.is_absolute():
+                resolved_test_path = REPO_ROOT / resolved_test_path
+            test_df = cached_load_test_split(str(resolved_test_path.resolve()))
+            predictions = cached_load_batch_predictions(source.strip())
+            review = predictions_vs_actuals(test_df, predictions)
+            st.session_state['prediction_review'] = {
+                'source': source.strip(),
+                'test_path': test_path,
+                'frame': review,
+                'report': review.attrs['quality_report'],
+            }
+        except Exception as exc:
+            st.session_state.pop('prediction_review', None)
+            st.error(f'Could not load predictions: {exc}')
+
+    loaded = st.session_state.get('prediction_review')
+    if not loaded or loaded['source'] != source.strip() or loaded['test_path'] != test_path:
+        st.info('Choose a predictions source and test split, then select “Load predictions”.')
+        return
+
+    report = loaded['report']
+    model_metrics = report['overall']
+    naive_metrics = report['baseline_seasonal_naive']
+    st.caption(f"{report['rows']:,} aligned prediction rows · model compared with seasonal naive")
+    metric_columns = st.columns(3)
+    for column, metric in zip(metric_columns, ('mae', 'rmse', 'wape')):
+        value = model_metrics[metric]
+        naive = naive_metrics[metric]
+        value_format = '{:.3f}' if metric == 'wape' else '{:.2f}'
+        column.metric(
+            metric.upper(),
+            value_format.format(value),
+            delta=f'{value - naive:+.3f} vs seasonal naive',
+            delta_color='inverse',
+        )
+
+    review = loaded['frame']
+    stores = sorted(review['Store ID'].dropna().unique().tolist())
+    if not stores:
+        st.info('The aligned prediction frame has no store rows to display.')
+        return
+    selected_store = st.selectbox('Store ID', stores, key='review_store')
+    store_rows = review[review['Store ID'] == selected_store]
+    products = sorted(store_rows['Product ID'].dropna().unique().tolist())
+    if not products:
+        st.info('No products are available for the selected store.')
+        return
+    selected_product = st.selectbox('Product ID', products, key='review_product')
+    selected_rows = store_rows[store_rows['Product ID'] == selected_product].sort_values('Date')
+    st.line_chart(selected_rows.set_index('Date')[['actual', 'predicted', 'seasonal_naive']])
+    st.dataframe(selected_rows, use_container_width=True, hide_index=True)
 
 
 @st.cache_data(show_spinner='Loading and engineering features...')
@@ -105,42 +314,85 @@ def predict_endpoint(endpoint_name: str, region: str, window: np.ndarray) -> dic
     return {'payload_sent': payload, 'response': body}
 
 
-def main():
-    st.set_page_config(page_title='Retail Demand Forecast Tester', layout='wide')
-    st.title('Retail Demand Forecast — Model / Endpoint Tester')
+def render_forecast_tester():
+    st.subheader('Retail Demand Forecast — Model / Endpoint Tester')
     st.caption('AAI-540 Group 4 — Retail Store Inventory Demand Forecasting')
 
     df, config = load_engineered_data()
     fe_cfg = config['feature_engineering']
     sequence_length = fe_cfg['sequence_length']
 
-    with st.sidebar:
-        st.header('Settings')
-        mode = st.radio('Prediction source', ['Local model', 'SageMaker endpoint'])
+    st.subheader('Settings')
+    mode = st.radio(
+        'Prediction source',
+        ['Local model', 'SageMaker endpoint'],
+        horizontal=True,
+        key='tester_prediction_source',
+    )
 
-        endpoint_name, region = None, None
-        if mode == 'SageMaker endpoint':
-            endpoint_name = st.text_input('Endpoint name', placeholder='retail-forecasting-endpoint-...')
-            region = st.text_input('AWS region', value='us-east-1')
-            st.caption('Requires AWS credentials available to this process (e.g. `aws configure`, '
-                      'or run inside SageMaker Studio with the attached execution role).')
+    endpoint_name, region = None, None
+    if mode == 'SageMaker endpoint':
+        endpoint_column, region_column = st.columns(2)
+        with endpoint_column:
+            endpoint_name = st.text_input(
+                'Endpoint name',
+                placeholder='retail-forecasting-endpoint-...',
+                key='tester_endpoint_name',
+            )
+        with region_column:
+            region = st.text_input('AWS region', value='us-east-1', key='tester_aws_region')
+        st.caption('Requires AWS credentials available to this process (e.g. `aws configure`, '
+                  'or run inside SageMaker Studio with the attached execution role).')
 
-        st.divider()
-        store = st.selectbox('Store ID', sorted(df[STORE_COLUMN].unique()))
-        product = st.selectbox('Product ID', sorted(df[PRODUCT_COLUMN].unique()))
+    store_column, product_column, date_column = st.columns(3)
+    with store_column:
+        store = st.selectbox(
+            'Store ID',
+            sorted(df[STORE_COLUMN].unique()),
+            key='tester_store',
+        )
+    with product_column:
+        product = st.selectbox(
+            'Product ID',
+            sorted(df[PRODUCT_COLUMN].unique()),
+            key='tester_product',
+        )
+    with date_column:
         as_of_date = st.date_input(
             'Forecast as of (last known day)',
             value=df[DATE_COLUMN].max().date(),
             min_value=df[DATE_COLUMN].min().date(),
             max_value=df[DATE_COLUMN].max().date(),
+            key='tester_forecast_date',
         )
 
-        st.divider()
-        st.caption("What-if overrides for the most recent day (optional)")
-        price_override = st.number_input('Price override', min_value=0.0, value=0.0, step=1.0,
-                                         help='0 = use the historical value')
-        discount_override = st.number_input('Discount % override', min_value=0.0, max_value=100.0, value=0.0, step=1.0)
-        promo_override = st.selectbox('Holiday/Promotion override', ['(use historical)', 'No', 'Yes'])
+    with st.expander('What-if overrides'):
+        st.caption('Optional changes to the most recent day in the selected history.')
+        price_column, discount_column, promotion_column = st.columns(3)
+        with price_column:
+            price_override = st.number_input(
+                'Price override',
+                min_value=0.0,
+                value=0.0,
+                step=1.0,
+                help='0 = use the historical value',
+                key='tester_price_override',
+            )
+        with discount_column:
+            discount_override = st.number_input(
+                'Discount % override',
+                min_value=0.0,
+                max_value=100.0,
+                value=0.0,
+                step=1.0,
+                key='tester_discount_override',
+            )
+        with promotion_column:
+            promo_override = st.selectbox(
+                'Holiday/Promotion override',
+                ['(use historical)', 'No', 'Yes'],
+                key='tester_promotion_override',
+            )
 
     overrides = {
         'Price': price_override if price_override > 0 else None,
@@ -166,7 +418,11 @@ def main():
 
     with col2:
         st.subheader('Forecast')
-        if window is not None and st.button('Generate forecast', type='primary'):
+        if window is not None and st.button(
+            'Generate forecast',
+            type='primary',
+            key='tester_generate_forecast',
+        ):
             if mode == 'Local model':
                 bundle = load_local_model()
                 if bundle['type'] != 'sequence':
@@ -178,7 +434,7 @@ def main():
                     st.caption(f"Model: {bundle['metadata']['model_type']}")
             else:
                 if not endpoint_name:
-                    st.error('Enter an endpoint name in the sidebar first.')
+                    st.error('Enter an endpoint name in the settings above.')
                 else:
                     try:
                         result = predict_endpoint(endpoint_name, region, window)
@@ -189,6 +445,33 @@ def main():
                             st.json({'request': json.loads(result['payload_sent']), 'response': result['response']})
                     except Exception as exc:
                         st.error(f'Endpoint invocation failed: {exc}')
+
+
+def main():
+    st.set_page_config(page_title='Retail Inventory Forecast Dashboard', layout='wide')
+    st.title('Retail Store Inventory Forecast Dashboard')
+    st.caption('AAI-540 Group 4 — Retail Store Inventory Demand Forecasting')
+
+    mlflow_config = load_config(str(CONFIG_PATH)).get('mlflow', {})
+    with st.sidebar:
+        st.header('MLflow settings')
+        tracking_uri_input = st.text_input(
+            'Tracking URI',
+            value=mlflow_config.get('tracking_uri', 'sqlite:///mlflow.db'),
+        )
+        experiment_name = st.text_input(
+            'Experiment name',
+            value=mlflow_config.get('experiment_name', 'retail_inventory_forecasting'),
+        )
+        st.caption(f'Resolved tracking URI: `{resolve_tracking_uri(tracking_uri_input)}`')
+
+    tabs = st.tabs(['Model comparison', 'How predictions are made', 'Forecast tester'])
+    with tabs[0]:
+        render_model_comparison(resolve_tracking_uri(tracking_uri_input), experiment_name)
+    with tabs[1]:
+        render_prediction_review()
+    with tabs[2]:
+        render_forecast_tester()
 
 
 if __name__ == '__main__':
