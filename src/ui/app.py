@@ -170,7 +170,7 @@ def render_model_comparison(tracking_uri: str, experiment_name: str):
 
 
 def render_prediction_review():
-    st.image(str(REPO_ROOT / 'docs' / 'architecture_diagram.png'), use_container_width=True)
+    st.image(str(REPO_ROOT / 'docs' / 'architecture_diagram.png'))
     st.markdown(
         '1. **Feature Store** provides the retail data.  \n'
         '2. **SageMaker Pipeline** runs Preprocess → Train → Evaluate → WAPE gate.  \n'
@@ -182,11 +182,19 @@ def render_prediction_review():
     st.subheader('Batch prediction review')
     source_column, test_column = st.columns(2)
     with source_column:
-        source = st.text_input('Predictions source (local path or S3 URI)', value=DEFAULT_PREDICTIONS_SOURCE)
+        source = st.text_input(
+            'Predictions source (local path or S3 URI)',
+            value=DEFAULT_PREDICTIONS_SOURCE,
+            key='review_predictions_source',
+        )
     with test_column:
-        test_path = st.text_input('Test split Parquet path', value='data/processed/test.parquet')
+        test_path = st.text_input(
+            'Test split Parquet path',
+            value='data/processed/test.parquet',
+            key='review_test_split_path',
+        )
 
-    if st.button('Load predictions'):
+    if st.button('Load predictions', key='review_load_predictions'):
         try:
             resolved_test_path = Path(test_path)
             if not resolved_test_path.is_absolute():
@@ -230,13 +238,13 @@ def render_prediction_review():
     if not stores:
         st.info('The aligned prediction frame has no store rows to display.')
         return
-    selected_store = st.selectbox('Store ID', stores)
+    selected_store = st.selectbox('Store ID', stores, key='review_store')
     store_rows = review[review['Store ID'] == selected_store]
     products = sorted(store_rows['Product ID'].dropna().unique().tolist())
     if not products:
         st.info('No products are available for the selected store.')
         return
-    selected_product = st.selectbox('Product ID', products)
+    selected_product = st.selectbox('Product ID', products, key='review_product')
     selected_rows = store_rows[store_rows['Product ID'] == selected_product].sort_values('Date')
     st.line_chart(selected_rows.set_index('Date')[['actual', 'predicted', 'seasonal_naive']])
     st.dataframe(selected_rows, use_container_width=True, hide_index=True)
@@ -314,33 +322,77 @@ def render_forecast_tester():
     fe_cfg = config['feature_engineering']
     sequence_length = fe_cfg['sequence_length']
 
-    with st.sidebar:
-        st.header('Settings')
-        mode = st.radio('Prediction source', ['Local model', 'SageMaker endpoint'])
+    st.subheader('Settings')
+    mode = st.radio(
+        'Prediction source',
+        ['Local model', 'SageMaker endpoint'],
+        horizontal=True,
+        key='tester_prediction_source',
+    )
 
-        endpoint_name, region = None, None
-        if mode == 'SageMaker endpoint':
-            endpoint_name = st.text_input('Endpoint name', placeholder='retail-forecasting-endpoint-...')
-            region = st.text_input('AWS region', value='us-east-1')
-            st.caption('Requires AWS credentials available to this process (e.g. `aws configure`, '
-                      'or run inside SageMaker Studio with the attached execution role).')
+    endpoint_name, region = None, None
+    if mode == 'SageMaker endpoint':
+        endpoint_column, region_column = st.columns(2)
+        with endpoint_column:
+            endpoint_name = st.text_input(
+                'Endpoint name',
+                placeholder='retail-forecasting-endpoint-...',
+                key='tester_endpoint_name',
+            )
+        with region_column:
+            region = st.text_input('AWS region', value='us-east-1', key='tester_aws_region')
+        st.caption('Requires AWS credentials available to this process (e.g. `aws configure`, '
+                  'or run inside SageMaker Studio with the attached execution role).')
 
-        st.divider()
-        store = st.selectbox('Store ID', sorted(df[STORE_COLUMN].unique()))
-        product = st.selectbox('Product ID', sorted(df[PRODUCT_COLUMN].unique()))
+    store_column, product_column, date_column = st.columns(3)
+    with store_column:
+        store = st.selectbox(
+            'Store ID',
+            sorted(df[STORE_COLUMN].unique()),
+            key='tester_store',
+        )
+    with product_column:
+        product = st.selectbox(
+            'Product ID',
+            sorted(df[PRODUCT_COLUMN].unique()),
+            key='tester_product',
+        )
+    with date_column:
         as_of_date = st.date_input(
             'Forecast as of (last known day)',
             value=df[DATE_COLUMN].max().date(),
             min_value=df[DATE_COLUMN].min().date(),
             max_value=df[DATE_COLUMN].max().date(),
+            key='tester_forecast_date',
         )
 
-        st.divider()
-        st.caption("What-if overrides for the most recent day (optional)")
-        price_override = st.number_input('Price override', min_value=0.0, value=0.0, step=1.0,
-                                         help='0 = use the historical value')
-        discount_override = st.number_input('Discount % override', min_value=0.0, max_value=100.0, value=0.0, step=1.0)
-        promo_override = st.selectbox('Holiday/Promotion override', ['(use historical)', 'No', 'Yes'])
+    with st.expander('What-if overrides'):
+        st.caption('Optional changes to the most recent day in the selected history.')
+        price_column, discount_column, promotion_column = st.columns(3)
+        with price_column:
+            price_override = st.number_input(
+                'Price override',
+                min_value=0.0,
+                value=0.0,
+                step=1.0,
+                help='0 = use the historical value',
+                key='tester_price_override',
+            )
+        with discount_column:
+            discount_override = st.number_input(
+                'Discount % override',
+                min_value=0.0,
+                max_value=100.0,
+                value=0.0,
+                step=1.0,
+                key='tester_discount_override',
+            )
+        with promotion_column:
+            promo_override = st.selectbox(
+                'Holiday/Promotion override',
+                ['(use historical)', 'No', 'Yes'],
+                key='tester_promotion_override',
+            )
 
     overrides = {
         'Price': price_override if price_override > 0 else None,
@@ -366,7 +418,11 @@ def render_forecast_tester():
 
     with col2:
         st.subheader('Forecast')
-        if window is not None and st.button('Generate forecast', type='primary'):
+        if window is not None and st.button(
+            'Generate forecast',
+            type='primary',
+            key='tester_generate_forecast',
+        ):
             if mode == 'Local model':
                 bundle = load_local_model()
                 if bundle['type'] != 'sequence':
@@ -378,7 +434,7 @@ def render_forecast_tester():
                     st.caption(f"Model: {bundle['metadata']['model_type']}")
             else:
                 if not endpoint_name:
-                    st.error('Enter an endpoint name in the sidebar first.')
+                    st.error('Enter an endpoint name in the settings above.')
                 else:
                     try:
                         result = predict_endpoint(endpoint_name, region, window)
