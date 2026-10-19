@@ -43,7 +43,7 @@ class SageMakerTrainingJob:
 
     def launch_training_job(self, train_s3_uri: str, val_s3_uri: str,
                             job_name: str = None, hyperparameters: dict = None,
-                            instance_type: str = 'ml.m5.xlarge'):
+                            instance_type: str = 'ml.m5.xlarge', test_s3_uri: str = None):
         """
         Launch a SageMaker training job.
 
@@ -54,6 +54,9 @@ class SageMakerTrainingJob:
             hyperparameters: Dictionary of hyperparameters (see scripts/train.py parse_args)
             instance_type: Instance type (CPU is sufficient at this dataset's scale;
                 a GPU instance such as ml.g4dn.xlarge may reduce LSTM training time)
+            test_s3_uri: Optional S3 URI of the test Parquet split; when given,
+                the training script writes evaluation.json (test-set metrics
+                vs a seasonal-naive baseline) into the model artifact
 
         Returns:
             Fitted TensorFlow estimator object
@@ -74,6 +77,9 @@ class SageMakerTrainingJob:
 
         train_input = TrainingInput(s3_data=train_s3_uri, content_type='application/x-parquet')
         val_input = TrainingInput(s3_data=val_s3_uri, content_type='application/x-parquet')
+        channels = {'train': train_input, 'validation': val_input}
+        if test_s3_uri:
+            channels['test'] = TrainingInput(s3_data=test_s3_uri, content_type='application/x-parquet')
 
         estimator = TensorFlow(
             entry_point='train.py',
@@ -90,7 +96,7 @@ class SageMakerTrainingJob:
         )
 
         logger.info(f"Launching training job: {job_name}")
-        estimator.fit({'train': train_input, 'validation': val_input}, job_name=job_name)
+        estimator.fit(channels, job_name=job_name)
 
         logger.info(f"Training job {job_name} completed")
         return estimator
@@ -127,6 +133,7 @@ def main():
 
     train_s3_uri = f"s3://{trainer.bucket_name}/{trainer.base_prefix}/train/train.parquet"
     val_s3_uri = f"s3://{trainer.bucket_name}/{trainer.base_prefix}/val/val.parquet"
+    test_s3_uri = f"s3://{trainer.bucket_name}/{trainer.base_prefix}/test/test.parquet"
 
     model_type = os.environ.get('MODEL_TYPE', 'lstm')
     hyperparameters = None
@@ -136,7 +143,8 @@ def main():
             'ridge_alpha': float(os.environ.get('RIDGE_ALPHA', '1.0')),
         }
 
-    estimator = trainer.launch_training_job(train_s3_uri, val_s3_uri, hyperparameters=hyperparameters)
+    estimator = trainer.launch_training_job(train_s3_uri, val_s3_uri, hyperparameters=hyperparameters,
+                                            test_s3_uri=test_s3_uri)
     print(f"Training job launched: {estimator._current_job_name}")
 
 
