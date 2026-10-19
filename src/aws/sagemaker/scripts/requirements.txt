@@ -6,3 +6,10 @@ tensorflow==2.15.0
 # startup and break (the built-in serving stack fails to boot with
 # "TypeError: Descriptors cannot be created directly").
 protobuf==3.20.3
+# Pin scikit-learn to match the SageMaker SKLearn serving container's
+# version (framework_version='1.2-1' in batch_inference.py/deployment.py).
+# Without this, the training container's unpinned (newer) scikit-learn
+# pickles the classical model's ColumnTransformer with internals the
+# serving container's older scikit-learn cannot unpickle, failing with
+# "AttributeError: Can't get attribute '_RemainderColsList'".
+scikit-learn==1.2.1
