@@ -12,6 +12,12 @@ It supports the two model families produced by the local pipeline:
 The chosen family is passed as the `--model_type` hyperparameter so the same
 script backs the training job regardless of which model the design document's
 comparison selects.
+
+When a `test` channel is provided, the trained artifact is re-loaded and
+scored on the held-out test split alongside a seasonal-naive baseline, and
+the result is written as `evaluation.json` inside the model artifact. The
+SageMaker Pipeline's evaluation step and quality gate read that file, so the
+release decision never needs to unpickle the model itself.
 """
 
 import argparse
@@ -44,6 +50,9 @@ NUMERIC_COLS += [f'{TARGET_COLUMN}_lag_{lag}' for lag in LAG_DAYS]
 NUMERIC_COLS += [f'{TARGET_COLUMN}_rolling_mean_{w}' for w in ROLLING_WINDOWS]
 NUMERIC_COLS += [f'{TARGET_COLUMN}_rolling_std_{w}' for w in ROLLING_WINDOWS]
 
+# Seasonal-naive baseline: the value observed 7 days earlier (weekly seasonality)
+SEASONAL_NAIVE_COL = f'{TARGET_COLUMN}_lag_7'
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -60,7 +69,8 @@ def parse_args():
 
     parser.add_argument('--train', type=str, default=os.environ.get('SM_CHANNEL_TRAIN'))
     parser.add_argument('--validation', type=str, default=os.environ.get('SM_CHANNEL_VALIDATION'))
-    parser.add_argument('--model_dir', type=str, default=os.environ.get('SM_MODEL_DIR'))
+    parser.add_argument('--test', type=str, default=os.environ.get('SM_CHANNEL_TEST'))
+    parser.add_argument('--model_dir', type=str, default=os.environ.get('SM_MODEL_DIR', '.'))
     parser.add_argument('--output_dir', type=str, default=os.environ.get('SM_OUTPUT_DATA_DIR', '/opt/ml/output/data'))
     return parser.parse_args()
 
@@ -97,8 +107,8 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     return df, feature_cols
 
 
-def build_sequences(df, feature_cols, sequence_length):
-    X_list, y_list = [], []
+def build_sequences(df, feature_cols, sequence_length, return_index=False):
+    X_list, y_list, row_index = [], [], []
     feature_values = df[feature_cols].to_numpy(dtype=np.float32)
     target_values = df[TARGET_COLUMN].to_numpy(dtype=np.float32)
     for _, idx in df.groupby(GROUP_COLS, sort=False).indices.items():
@@ -110,7 +120,11 @@ def build_sequences(df, feature_cols, sequence_length):
             end = start + sequence_length
             X_list.append(gf[start:end])
             y_list.append(gt[end])
-    return np.stack(X_list), np.array(y_list, dtype=np.float32)
+            row_index.append(idx[end])
+    X, y = np.stack(X_list), np.array(y_list, dtype=np.float32)
+    if return_index:
+        return X, y, np.array(row_index)
+    return X, y
 
 
 def evaluate(y_true, y_pred) -> dict:
@@ -133,7 +147,7 @@ def train_ridge(train_df, val_df, feature_cols, args):
     model.fit(train_df[numeric_cols + CATEGORICAL_COLS], train_df[TARGET_COLUMN])
     val_pred = model.predict(val_df[numeric_cols + CATEGORICAL_COLS])
     metrics = evaluate(val_df[TARGET_COLUMN], val_pred)
-    joblib.dump(model, os.path.join(os.environ.get('SM_MODEL_DIR', '.'), 'model.joblib'))
+    joblib.dump(model, os.path.join(args.model_dir, 'model.joblib'))
     return metrics
 
 
@@ -165,14 +179,63 @@ def train_lstm(train_df, val_df, feature_cols, args):
     val_pred = model.predict(X_val_s, verbose=0).reshape(-1)
     metrics = evaluate(y_val, val_pred)
 
-    model_dir = os.environ.get('SM_MODEL_DIR', '.')
-    model.save(os.path.join(model_dir, 'model.keras'))
-    joblib.dump(scaler, os.path.join(model_dir, 'sequence_scaler.joblib'))
+    model.save(os.path.join(args.model_dir, 'model.keras'))
+    joblib.dump(scaler, os.path.join(args.model_dir, 'sequence_scaler.joblib'))
     return metrics
+
+
+def predict_test(model_type, model_dir, test_df, feature_cols, sequence_length):
+    """
+    Score the held-out test split with the artifact saved in model_dir.
+
+    Returns (y_true, y_pred, y_naive) aligned row-for-row, where y_naive is
+    the seasonal-naive forecast for the same target rows.
+    """
+    if model_type == 'lstm':
+        import tensorflow as tf
+
+        model = tf.keras.models.load_model(os.path.join(model_dir, 'model.keras'))
+        scaler = joblib.load(os.path.join(model_dir, 'sequence_scaler.joblib'))
+        X, y_true, rows = build_sequences(test_df, feature_cols, sequence_length, return_index=True)
+        X_s = scaler.transform(X.reshape(-1, X.shape[-1])).reshape(X.shape).astype(np.float32)
+        y_pred = model.predict(X_s, verbose=0).reshape(-1)
+        y_naive = test_df[SEASONAL_NAIVE_COL].to_numpy()[rows]
+        return y_true, y_pred, y_naive
+
+    model = joblib.load(os.path.join(model_dir, 'model.joblib'))
+    numeric_cols = [c for c in feature_cols if c not in CATEGORICAL_COLS]
+    y_pred = model.predict(test_df[numeric_cols + CATEGORICAL_COLS])
+    return test_df[TARGET_COLUMN].to_numpy(), y_pred, test_df[SEASONAL_NAIVE_COL].to_numpy()
+
+
+def build_evaluation_report(model_type, y_true, y_pred, y_naive, validation_metrics) -> dict:
+    """
+    Assemble evaluation.json: candidate vs seasonal-naive metrics on the test
+    split, plus a `regression_metrics` block in the format SageMaker Model
+    Registry displays on the model package's metrics tab.
+    """
+    test_metrics = evaluate(y_true, y_pred)
+    baseline_metrics = evaluate(y_true, y_naive)
+    improvement = 1.0 - test_metrics['wape'] / baseline_metrics['wape'] if baseline_metrics['wape'] else 0.0
+    return {
+        'model_type': model_type,
+        'n_test_rows': int(len(y_true)),
+        'validation': validation_metrics,
+        'test': test_metrics,
+        'baseline_seasonal_naive': baseline_metrics,
+        'wape_improvement_vs_baseline': float(improvement),
+        'regression_metrics': {
+            'mae': {'value': test_metrics['mae']},
+            'rmse': {'value': test_metrics['rmse']},
+            'wape': {'value': test_metrics['wape']},
+            'baseline_wape': {'value': baseline_metrics['wape']},
+        },
+    }
 
 
 def main():
     args = parse_args()
+    os.makedirs(args.model_dir, exist_ok=True)
     train_df, feature_cols = engineer_features(read_channel(args.train))
     val_df, _ = engineer_features(read_channel(args.validation))
 
@@ -185,6 +248,16 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     with open(os.path.join(args.output_dir, 'metrics.json'), 'w') as f:
         json.dump({'model_type': args.model_type, **metrics}, f, indent=2)
+
+    if args.test:
+        test_df, _ = engineer_features(read_channel(args.test))
+        y_true, y_pred, y_naive = predict_test(args.model_type, args.model_dir, test_df,
+                                               feature_cols, args.sequence_length)
+        report = build_evaluation_report(args.model_type, y_true, y_pred, y_naive, metrics)
+        print(f"Test metrics: {report['test']} | seasonal-naive: {report['baseline_seasonal_naive']}")
+        for directory in (args.model_dir, args.output_dir):
+            with open(os.path.join(directory, 'evaluation.json'), 'w') as f:
+                json.dump(report, f, indent=2)
 
 
 if __name__ == '__main__':
