@@ -217,11 +217,26 @@ class MonitoringReports:
         self.s3.upload_file(str(local_path), self.bucket, key)
         return self.s3_uri(key)
 
+    @staticmethod
+    def _parse_batch_output(body: str) -> list:
+        """Parse the batch-transform output file.
+
+        batch_transform.py's output_fn writes plain CSV (one prediction per
+        line) when the Transformer requests Accept='text/csv', or a single
+        JSON object {"predictions": [...]} when it requests/receives
+        'application/json' (the SKLearn container's default when no Accept
+        is set). Handle whichever is actually in S3 rather than assuming one.
+        """
+        stripped = body.strip()
+        if stripped.startswith('{'):
+            return json.loads(stripped)['predictions']
+        return pd.read_csv(StringIO(body), header=None)[0].to_numpy()
+
     # ---- model quality -------------------------------------------------
     def model_quality(self, output_key: str = f'{BASE_PREFIX}/predictions/batch_input.csv.out',
                       publish: bool = True) -> dict:
         body = self.s3.get_object(Bucket=self.bucket, Key=output_key)['Body'].read().decode('utf-8')
-        predictions = pd.read_csv(StringIO(body), header=None)[0].to_numpy()
+        predictions = np.asarray(self._parse_batch_output(body), dtype=float)
         report = build_model_quality_report(batch_feature_frame(self.load_split('test')), predictions)
         report['predictions_s3_uri'] = self.s3_uri(output_key)
 
