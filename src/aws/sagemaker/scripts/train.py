@@ -34,6 +34,16 @@ CATEGORICAL_COLS = ['Category', 'Region', 'Weather Condition', 'Seasonality'] + 
 LAG_DAYS = [1, 7, 14, 30]
 ROLLING_WINDOWS = [7, 14, 30]
 
+# Static (data-independent) numeric feature column order, shared by
+# engineer_features() and the header-less batch transform CSV contract
+# (batch_transform.py's input_fn must assign these same names in this same
+# order to the columns it reads, since the uploaded CSV has no header row).
+NUMERIC_COLS = ['Price', 'Discount', 'Competitor Pricing', 'Holiday/Promotion',
+                'day_of_week', 'month', 'quarter', 'year', 'week_of_year', 'is_weekend']
+NUMERIC_COLS += [f'{TARGET_COLUMN}_lag_{lag}' for lag in LAG_DAYS]
+NUMERIC_COLS += [f'{TARGET_COLUMN}_rolling_mean_{w}' for w in ROLLING_WINDOWS]
+NUMERIC_COLS += [f'{TARGET_COLUMN}_rolling_std_{w}' for w in ROLLING_WINDOWS]
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -82,11 +92,7 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
         df[f'{TARGET_COLUMN}_rolling_mean_{window}'] = rolling.mean().reset_index(level=list(range(len(GROUP_COLS))), drop=True)
         df[f'{TARGET_COLUMN}_rolling_std_{window}'] = rolling.std().reset_index(level=list(range(len(GROUP_COLS))), drop=True)
 
-    feature_cols = ['Price', 'Discount', 'Competitor Pricing', 'Holiday/Promotion',
-                    'day_of_week', 'month', 'quarter', 'year', 'week_of_year', 'is_weekend']
-    feature_cols += [f'{TARGET_COLUMN}_lag_{lag}' for lag in LAG_DAYS]
-    feature_cols += [f'{TARGET_COLUMN}_rolling_mean_{w}' for w in ROLLING_WINDOWS]
-    feature_cols += [f'{TARGET_COLUMN}_rolling_std_{w}' for w in ROLLING_WINDOWS]
+    feature_cols = list(NUMERIC_COLS)
     df = df.dropna(subset=feature_cols).reset_index(drop=True)
     return df, feature_cols
 
