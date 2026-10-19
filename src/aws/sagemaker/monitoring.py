@@ -10,8 +10,6 @@ from datetime import datetime
 import boto3
 import sagemaker
 from dotenv import load_dotenv
-from sagemaker.model_monitor import DefaultModelMonitor
-from sagemaker.model_monitor.dataset_format import DatasetFormat
 
 import logging
 
@@ -54,6 +52,9 @@ class SageMakerModelMonitor:
         Returns:
             DefaultModelMonitor object
         """
+        from sagemaker.model_monitor import DefaultModelMonitor
+        from sagemaker.model_monitor.dataset_format import DatasetFormat
+
         if output_s3_uri is None:
             output_s3_uri = f"s3://{self.bucket_name}/{self.base_prefix}/monitoring/baseline/"
 
@@ -91,6 +92,8 @@ class SageMakerModelMonitor:
         Returns:
             DefaultModelMonitor object
         """
+        from sagemaker.model_monitor import DefaultModelMonitor
+
         if output_s3_uri is None:
             output_s3_uri = f"s3://{self.bucket_name}/{self.base_prefix}/monitoring/results/"
 
