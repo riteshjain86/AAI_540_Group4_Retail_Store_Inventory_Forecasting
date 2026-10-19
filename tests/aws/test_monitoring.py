@@ -60,7 +60,13 @@ def test_parse_batch_output_handles_csv_and_json():
     from src.aws.sagemaker import monitoring_reports as mr
 
     assert list(mr.MonitoringReports._parse_batch_output('1.5\n2.5\n3.5')) == [1.5, 2.5, 3.5]
-    assert mr.MonitoringReports._parse_batch_output('{"predictions": [1.5, 2.5, 3.5]}') == [1.5, 2.5, 3.5]
+    assert list(mr.MonitoringReports._parse_batch_output('1.5,2.5,3.5')) == [1.5, 2.5, 3.5]
+    assert list(mr.MonitoringReports._parse_batch_output('1.5,2.5\n3.5\n')) == [1.5, 2.5, 3.5]
+    assert list(mr.MonitoringReports._parse_batch_output('{"predictions": [1.5, 2.5, 3.5]}')) == [
+        1.5, 2.5, 3.5,
+    ]
+    with pytest.raises(ValueError, match='non-numeric'):
+        mr.MonitoringReports._parse_batch_output('1.5,not-a-number,3.5')
 
 
 def test_dashboard_uses_real_dimensions(monkeypatch):

@@ -30,7 +30,6 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
-from io import StringIO
 from pathlib import Path
 
 import boto3
@@ -46,6 +45,20 @@ SCRIPTS_DIR = Path(__file__).parent / 'scripts'
 REPORT_DIR = Path('reports/monitoring')
 SEGMENT_COLS = ['Store ID', 'Category', 'Region']
 PSI_ALERT = 0.2
+
+
+def parse_batch_output(body: str) -> np.ndarray:
+    """Parse batch predictions from JSON or comma/newline-delimited text."""
+    stripped = body.strip()
+    if stripped.startswith('{'):
+        values = json.loads(stripped)['predictions']
+    else:
+        values = [token.strip() for token in re.split(r'[,\r\n]+', stripped) if token.strip()]
+    try:
+        return np.asarray(values, dtype=float).reshape(-1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('Batch output contains a non-numeric prediction') from exc
+
 
 sys.path.insert(0, str(SCRIPTS_DIR))
 from train import (CATEGORICAL_COLS, NUMERIC_COLS,  # noqa: E402
@@ -218,19 +231,9 @@ class MonitoringReports:
         return self.s3_uri(key)
 
     @staticmethod
-    def _parse_batch_output(body: str) -> list:
-        """Parse the batch-transform output file.
-
-        batch_transform.py's output_fn writes plain CSV (one prediction per
-        line) when the Transformer requests Accept='text/csv', or a single
-        JSON object {"predictions": [...]} when it requests/receives
-        'application/json' (the SKLearn container's default when no Accept
-        is set). Handle whichever is actually in S3 rather than assuming one.
-        """
-        stripped = body.strip()
-        if stripped.startswith('{'):
-            return json.loads(stripped)['predictions']
-        return pd.read_csv(StringIO(body), header=None)[0].to_numpy()
+    def _parse_batch_output(body: str) -> np.ndarray:
+        """Parse batch-transform output as JSON or comma/newline-delimited predictions."""
+        return parse_batch_output(body)
 
     # ---- model quality -------------------------------------------------
     def model_quality(self, output_key: str = f'{BASE_PREFIX}/predictions/batch_input.csv.out',
