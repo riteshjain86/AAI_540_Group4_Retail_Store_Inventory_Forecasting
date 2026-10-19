@@ -303,6 +303,13 @@ python deploy_sagemaker_lab.py        # sanity-checks AWS clients, prints next s
 
 ---
 
+## Dashboard
+
+Run the dashboard from the repository root with `streamlit run src/ui/app.py`. In SageMaker Studio JupyterLab,
+open `https://<studio-domain>/jupyter/default/proxy/8501/` to view the app.
+
+---
+
 ## Pipeline Workflow
 
 ### Step 1: Data Ingestion
