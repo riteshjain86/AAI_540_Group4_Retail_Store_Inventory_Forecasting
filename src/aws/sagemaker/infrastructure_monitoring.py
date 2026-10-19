@@ -30,10 +30,100 @@ class InfrastructureMonitoring:
 
         logger.info(f"Initialized infrastructure monitoring for region: {self.region}")
 
+    @staticmethod
+    def _search(expression: str, stat: str, period: int, label: str, metric_id: str) -> list:
+        """A CloudWatch SEARCH() metric row: one line per matching job/segment."""
+        return [{"expression": f"SEARCH('{expression}', '{stat}', {period})", "label": label, "id": metric_id}]
+
+    def _bucket_name(self) -> str:
+        account_id = self.account_id or boto3.client('sts', region_name=self.region).get_caller_identity()['Account']
+        return f"sagemaker-{self.region}-{account_id}"
+
+    def build_comprehensive_dashboard(self, bucket_name: str) -> dict:
+        """
+        Dashboard body for the ML system as it actually runs: SageMaker
+        Pipeline executions, the training / processing / batch-transform jobs
+        they launch (instance metrics are published per job host under the
+        /aws/sagemaker/*Jobs namespaces), Feature Store, S3, forecast accuracy
+        published by monitoring_reports.py, and the optional endpoint.
+        SEARCH() expressions pick up every job automatically, so new runs
+        appear without editing the dashboard.
+        """
+        r = self.region
+        pipeline_dims = '{AWS/Sagemaker/ModelBuildingPipeline,PipelineName}'
+        step_dims = '{AWS/Sagemaker/ModelBuildingPipeline,PipelineName,StepName}'
+        quality = '{RetailForecasting/ModelQuality,Segment}'
+
+        def widget(x, y, title, metrics, width=12, height=6, **props):
+            return {"type": "metric", "x": x, "y": y, "width": width, "height": height,
+                    "properties": {"metrics": metrics, "region": r, "title": title, **props}}
+
+        def job_widget(x, y, title, namespace):
+            return widget(x, y, title,
+                          self._search(f'{{{namespace},Host}} MetricName="CPUUtilization"', 'Average', 60,
+                                       'CPU %', 'cpu') +
+                          self._search(f'{{{namespace},Host}} MetricName="MemoryUtilization"', 'Average', 60,
+                                       'Memory %', 'mem'),
+                          view="timeSeries", period=60)
+
+        widgets = [
+            {"type": "text", "x": 0, "y": 0, "width": 24, "height": 2, "properties": {"markdown": (
+                "# Retail demand forecasting: ML system health\n"
+                "Pipeline `retail-forecasting-pipeline` (Preprocess > Train > Evaluate > WAPE gate > Register) | "
+                "batch transform inference | Feature Store `retail-inventory-features-*` | "
+                f"S3 `{bucket_name}/{self.base_prefix}`")}},
+            # Row 1: CI/CD DAG health
+            widget(0, 2, "Pipeline executions (succeeded / failed)",
+                   self._search(f'{pipeline_dims} MetricName="ExecutionSucceeded"', 'Sum', 3600, 'Succeeded', 'ok') +
+                   self._search(f'{pipeline_dims} MetricName="ExecutionFailed"', 'Sum', 3600, 'Failed', 'fail'),
+                   view="bar", period=3600),
+            widget(12, 2, "Pipeline step failures by step",
+                   self._search(f'{step_dims} MetricName="StepFailed"', 'Sum', 3600, '', 'stepfail'),
+                   view="bar", period=3600),
+            # Row 2: training and processing jobs
+            job_widget(0, 8, "Training jobs: CPU / memory per job", '/aws/sagemaker/TrainingJobs'),
+            job_widget(12, 8, "Processing jobs (preprocess, evaluate, Model Monitor): CPU / memory",
+                       '/aws/sagemaker/ProcessingJobs'),
+            # Row 3: inference and features
+            job_widget(0, 14, "Batch transform jobs: CPU / memory", '/aws/sagemaker/TransformJobs'),
+            widget(12, 14, "Feature Store operations",
+                   self._search('{AWS/SageMaker/FeatureStore,FeatureGroupName,OperationName} MetricName="Invocations"',
+                                'Sum', 300, '', 'fsinv'),
+                   view="timeSeries", period=300),
+            # Row 4: model quality from monitoring_reports.py
+            widget(0, 20, "Forecast accuracy: model vs seasonal-naive (MAE / RMSE)", [
+                ["RetailForecasting/ModelQuality", "mae", "Segment", "overall", {"label": "Model MAE"}],
+                [".", "rmse", ".", ".", {"label": "Model RMSE"}],
+                [".", "mae", ".", "seasonal_naive", {"label": "Seasonal-naive MAE"}],
+                [".", "rmse", ".", "seasonal_naive", {"label": "Seasonal-naive RMSE"}],
+            ], view="bar", stat="Average", period=86400),
+            widget(12, 20, "WAPE by segment (overall, baseline, per store)",
+                   self._search(f'{quality} MetricName="wape"', 'Average', 86400, '', 'wape'),
+                   view="bar", period=86400),
+            # Row 5: storage and optional endpoint
+            widget(0, 26, "S3 project bucket", [
+                ["AWS/S3", "BucketSizeBytes", "BucketName", bucket_name, "StorageType", "StandardStorage"],
+                [".", "NumberOfObjects", ".", ".", "StorageType", "AllStorageTypes", {"yAxis": "right"}],
+            ], stat="Average", period=86400),
+            widget(12, 26, "Real-time endpoint (only when deployed): latency / errors",
+                   self._search('{AWS/SageMaker,EndpointName,VariantName} MetricName="ModelLatency"',
+                                'Average', 300, 'Latency', 'lat') +
+                   self._search('{AWS/SageMaker,EndpointName,VariantName} MetricName="Invocation5XXErrors"',
+                                'Sum', 300, '5XX', 'err'),
+                   view="timeSeries", period=300),
+            # Row 6: metrics printed by the training script
+            {"type": "log", "x": 0, "y": 32, "width": 24, "height": 6, "properties": {
+                "region": r, "title": "Training job metrics (validation / test / seasonal-naive)", "view": "table",
+                "query": ("SOURCE '/aws/sagemaker/TrainingJobs' | fields @timestamp, @logStream, @message "
+                          "| filter @message like /Validation metrics|Test metrics/ "
+                          "| sort @timestamp desc | limit 20"),
+            }},
+        ]
+        return {"widgets": widgets}
+
     def create_comprehensive_dashboard(self, dashboard_name: str = "ml-system-monitoring"):
         """
-        Create a comprehensive CloudWatch dashboard for the ML system
-        (training jobs, endpoint, batch transform, S3, Feature Store, model quality).
+        Create the comprehensive CloudWatch dashboard for the ML system.
 
         Args:
             dashboard_name: Name of the dashboard
@@ -41,159 +131,7 @@ class InfrastructureMonitoring:
         Returns:
             Dashboard configuration
         """
-        endpoint_dim = f"{self.base_prefix}-endpoint"
-        dashboard_body = {
-            "widgets": [
-                # Row 1: SageMaker Training Jobs
-                {
-                    "type": "metric", "x": 0, "y": 0, "width": 12, "height": 6,
-                    "properties": {
-                        "metrics": [
-                            ["AWS/SageMaker", "CPUUtilization", "TrainingJobName", {"label": "Training CPU"}],
-                            [".", "MemoryUtilization", ".", {"label": "Training Memory"}],
-                            [".", "GPUUtilization", ".", {"label": "Training GPU"}],
-                        ],
-                        "period": 300, "stat": "Average", "region": self.region,
-                        "title": "SageMaker Training Jobs", "stacked": False,
-                    },
-                },
-                {
-                    "type": "metric", "x": 12, "y": 0, "width": 12, "height": 6,
-                    "properties": {
-                        "metrics": [
-                            ["AWS/SageMaker", "BillableTimeInSeconds", "TrainingJobName", {"stat": "Sum"}],
-                            [".", "TrainingTimeInSeconds", ".", {"stat": "Sum"}],
-                        ],
-                        "period": 86400, "stat": "Sum", "region": self.region, "title": "Training Job Duration",
-                    },
-                },
-                # Row 2: SageMaker Endpoint
-                {
-                    "type": "metric", "x": 0, "y": 6, "width": 12, "height": 6,
-                    "properties": {
-                        "metrics": [
-                            ["AWS/SageMaker", "ModelLatency", "EndpointName", endpoint_dim],
-                            [".", "OverheadLatency", ".", "."],
-                            [".", "Invocations", ".", {"stat": "Sum"}],
-                        ],
-                        "period": 300, "stat": "Average", "region": self.region,
-                        "title": "Endpoint Latency & Invocations",
-                    },
-                },
-                {
-                    "type": "metric", "x": 12, "y": 6, "width": 12, "height": 6,
-                    "properties": {
-                        "metrics": [
-                            ["AWS/SageMaker", "4XXError", "EndpointName", endpoint_dim, {"stat": "Sum"}],
-                            [".", "5XXError", ".", ".", {"stat": "Sum"}],
-                            [".", "Invocations", ".", ".", {"stat": "Sum"}],
-                        ],
-                        "period": 300, "stat": "Sum", "region": self.region, "title": "Endpoint Error Rates",
-                    },
-                },
-                # Row 3: Instance Metrics
-                {
-                    "type": "metric", "x": 0, "y": 12, "width": 12, "height": 6,
-                    "properties": {
-                        "metrics": [
-                            ["AWS/EC2", "CPUUtilization", "InstanceId", "*", {"label": "EC2 CPU"}],
-                            [".", "DiskReadBytes", ".", "*", {"label": "Disk Read"}],
-                            [".", "DiskWriteBytes", ".", "*", {"label": "Disk Write"}],
-                        ],
-                        "period": 300, "stat": "Average", "region": self.region,
-                        "title": "Instance Resource Utilization",
-                    },
-                },
-                {
-                    "type": "metric", "x": 12, "y": 12, "width": 12, "height": 6,
-                    "properties": {
-                        "metrics": [
-                            ["AWS/EC2", "NetworkIn", "InstanceId", "*", {"stat": "Sum"}],
-                            [".", "NetworkOut", ".", "*", {"stat": "Sum"}],
-                        ],
-                        "period": 300, "stat": "Sum", "region": self.region, "title": "Network Traffic",
-                    },
-                },
-                # Row 4: S3 Operations
-                {
-                    "type": "metric", "x": 0, "y": 18, "width": 12, "height": 6,
-                    "properties": {
-                        "metrics": [
-                            ["AWS/S3", "BucketSizeBytes", "BucketName", f"{self.base_prefix}"],
-                            [".", "NumberOfObjects", ".", "."],
-                        ],
-                        "period": 86400, "stat": "Average", "region": self.region, "title": "S3 Storage",
-                    },
-                },
-                {
-                    "type": "metric", "x": 12, "y": 18, "width": 12, "height": 6,
-                    "properties": {
-                        "metrics": [
-                            ["AWS/S3", "4xxErrors", "BucketName", f"{self.base_prefix}", {"stat": "Sum"}],
-                            [".", "5xxErrors", ".", ".", {"stat": "Sum"}],
-                            [".", "GetRequests", ".", ".", {"stat": "Sum"}],
-                            [".", "PutRequests", ".", ".", {"stat": "Sum"}],
-                        ],
-                        "period": 300, "stat": "Sum", "region": self.region, "title": "S3 Request Metrics",
-                    },
-                },
-                # Row 5: Feature Store
-                {
-                    "type": "metric", "x": 0, "y": 24, "width": 24, "height": 6,
-                    "properties": {
-                        "metrics": [
-                            ["AWS/SageMaker", "GetRecordsLatency", "FeatureGroupName", "retail-inventory-features-raw"],
-                            [".", "PutRecordLatency", ".", "."],
-                            [".", "GetRecordsSuccess", ".", {"stat": "Sum"}],
-                            [".", "PutRecordSuccess", ".", {"stat": "Sum"}],
-                        ],
-                        "period": 300, "stat": "Average", "region": self.region, "title": "Feature Store Operations",
-                    },
-                },
-                # Row 6: Batch Transform Jobs (primary inference pattern)
-                {
-                    "type": "metric", "x": 0, "y": 30, "width": 12, "height": 6,
-                    "properties": {
-                        "metrics": [
-                            ["AWS/SageMaker", "CPUUtilization", "TransformJobName", "*"],
-                            [".", "MemoryUtilization", ".", "*"],
-                        ],
-                        "period": 300, "stat": "Average", "region": self.region, "title": "Batch Transform Resources",
-                    },
-                },
-                {
-                    "type": "metric", "x": 12, "y": 30, "width": 12, "height": 6,
-                    "properties": {
-                        "metrics": [
-                            ["AWS/SageMaker", "TransformTimeInSeconds", "TransformJobName", "*", {"stat": "Sum"}],
-                            [".", "BillableTimeInSeconds", ".", "*", {"stat": "Sum"}],
-                        ],
-                        "period": 86400, "stat": "Sum", "region": self.region, "title": "Batch Transform Duration",
-                    },
-                },
-                # Row 7: Forecast accuracy custom metrics (published by monitoring.py)
-                {
-                    "type": "metric", "x": 0, "y": 36, "width": 12, "height": 6,
-                    "properties": {
-                        "metrics": [
-                            ["RetailForecasting/ModelQuality", "mae", "Segment", "overall"],
-                            [".", "rmse", ".", "."],
-                        ],
-                        "period": 86400, "stat": "Average", "region": self.region,
-                        "title": "Forecast Accuracy (MAE / RMSE)",
-                    },
-                },
-                {
-                    "type": "metric", "x": 12, "y": 36, "width": 12, "height": 6,
-                    "properties": {
-                        "metrics": [["RetailForecasting/ModelQuality", "wape", "Segment", "overall"]],
-                        "period": 86400, "stat": "Average", "region": self.region,
-                        "title": "Forecast Accuracy (WAPE)",
-                    },
-                },
-            ]
-        }
-
+        dashboard_body = self.build_comprehensive_dashboard(self._bucket_name())
         try:
             self.cloudwatch.put_dashboard(DashboardName=dashboard_name, DashboardBody=json.dumps(dashboard_body))
             logger.info(f"Comprehensive dashboard {dashboard_name} created successfully")
@@ -212,27 +150,27 @@ class InfrastructureMonitoring:
         Returns:
             Dashboard configuration
         """
+        namespace = '{/aws/sagemaker/TrainingJobs,Host}'
         dashboard_body = {
             "widgets": [
                 {
                     "type": "metric", "x": 0, "y": 0, "width": 12, "height": 6,
                     "properties": {
-                        "metrics": [
-                            ["AWS/SageMaker", "CPUUtilization", "TrainingJobName", "*"],
-                            [".", "MemoryUtilization", ".", "*"],
-                            [".", "GPUUtilization", ".", "*"],
-                        ],
-                        "period": 300, "stat": "Average", "region": self.region, "title": "Training Job Resources",
+                        "metrics": (self._search(f'{namespace} MetricName="CPUUtilization"', 'Average', 60, 'CPU %', 'cpu')
+                                    + self._search(f'{namespace} MetricName="MemoryUtilization"', 'Average', 60,
+                                                   'Memory %', 'mem')
+                                    + self._search(f'{namespace} MetricName="DiskUtilization"', 'Average', 60,
+                                                   'Disk %', 'disk')),
+                        "period": 60, "region": self.region, "title": "Training Job Resources",
                     },
                 },
                 {
-                    "type": "metric", "x": 12, "y": 0, "width": 12, "height": 6,
+                    "type": "log", "x": 12, "y": 0, "width": 12, "height": 6,
                     "properties": {
-                        "metrics": [
-                            ["AWS/SageMaker", "TrainingTimeInSeconds", "TrainingJobName", "*", {"stat": "Sum"}],
-                            [".", "BillableTimeInSeconds", ".", "*", {"stat": "Sum"}],
-                        ],
-                        "period": 86400, "stat": "Sum", "region": self.region, "title": "Training Duration",
+                        "region": self.region, "title": "Training job metrics", "view": "table",
+                        "query": ("SOURCE '/aws/sagemaker/TrainingJobs' | fields @timestamp, @logStream, @message "
+                                  "| filter @message like /Validation metrics|Test metrics/ "
+                                  "| sort @timestamp desc | limit 20"),
                     },
                 },
             ]
