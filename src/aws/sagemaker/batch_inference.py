@@ -76,6 +76,12 @@ class SageMakerBatchInference:
             instance_count=instance_count,
             instance_type=instance_type,
             output_path=f"s3://{self.bucket_name}/{self.base_prefix}/predictions/",
+            # Without an explicit Accept, the container defaults to
+            # 'application/json' and wraps predictions as {"predictions": [...]}
+            # on one line. Request plain CSV (one prediction per line) so the
+            # output matches batch_transform.py's output_fn CSV branch and is
+            # directly consumable by monitoring_reports.py / downstream tools.
+            accept='text/csv',
         )
 
         logger.info("Transformer created")
