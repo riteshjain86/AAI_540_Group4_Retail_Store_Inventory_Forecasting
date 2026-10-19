@@ -32,8 +32,14 @@ class InfrastructureMonitoring:
 
     @staticmethod
     def _search(expression: str, stat: str, period: int, label: str, metric_id: str) -> list:
-        """A CloudWatch SEARCH() metric row: one line per matching job/segment."""
-        return [{"expression": f"SEARCH('{expression}', '{stat}', {period})", "label": label, "id": metric_id}]
+        """A CloudWatch SEARCH() metric row: one line per matching job/segment.
+
+        CloudWatch requires every entry in a widget's "metrics" array to
+        itself be an array, so the expression object is wrapped in its own
+        single-element list (not returned bare) - that way concatenating
+        multiple _search() calls with `+` still yields a valid list-of-arrays.
+        """
+        return [[{"expression": f"SEARCH('{expression}', '{stat}', {period})", "label": label, "id": metric_id}]]
 
     def _bucket_name(self) -> str:
         account_id = self.account_id or boto3.client('sts', region_name=self.region).get_caller_identity()['Account']
