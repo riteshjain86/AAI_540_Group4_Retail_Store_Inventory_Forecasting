@@ -24,6 +24,8 @@
 13. [Configuration](#configuration)
 14. [Troubleshooting](#troubleshooting)
 15. [Future Improvements](#future-improvements)
+16. [Contributors](#contributors)
+17. [Contact](#contact)
 
 ---
 
@@ -557,3 +559,23 @@ All pipeline behavior is controlled by `config.yaml`:
 - Incorporate verified external drivers (supplier lead time, local events) if such data becomes available
 - Hierarchical or cold-start handling for new products/stores
 - Scheduled retraining with automated promotion gated on the same quality thresholds used here
+
+---
+
+## Contributors
+
+- Ved Prakash Dwivedi
+- Jagdish Mane
+- Tamayi Mlanda
+
+### Faculty Advisor
+
+- Prof. Azka Azka
+
+University of San Diego – Applied Artificial Intelligence Program
+
+---
+
+## Contact
+
+For questions or issues, please refer to the project documentation or contact the development team.
