@@ -119,6 +119,16 @@ def build_pipeline(role: str, bucket: str, region: str, pipeline_session: Pipeli
         hyperparameters={'model_type': 'ridge', 'ridge_alpha': ridge_alpha},
         output_path=f'{s3_root}/models/', base_job_name='retail-forecasting-pipeline-train',
         sagemaker_session=pipeline_session,
+        # Without this, the TensorFlow estimator auto-injects its own 'model_dir'
+        # hyperparameter (an S3 URI, meant for native TF distributed checkpointing).
+        # train.py's own --model_dir argparse argument then silently receives that
+        # S3 URI instead of the real SM_MODEL_DIR (/opt/ml/model), so model.joblib
+        # gets written to a bogus local directory mimicking the S3 path and never
+        # reaches /opt/ml/model - SageMaker then has nothing to package into
+        # model.tar.gz, and EvaluateModel fails downstream with "No S3 objects
+        # found". model_dir=False disables the auto-injection so train.py's own
+        # SM_MODEL_DIR-derived default is used instead.
+        model_dir=False,
     )
     step_train = TrainingStep(
         name='TrainModel',

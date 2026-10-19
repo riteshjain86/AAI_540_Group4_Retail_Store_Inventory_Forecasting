@@ -93,6 +93,14 @@ class SageMakerTrainingJob:
             output_path=f"s3://{self.bucket_name}/{self.base_prefix}/models/",
             base_job_name='retail-forecasting',
             sagemaker_session=self.sagemaker_session,
+            # Disable the TensorFlow estimator's automatic 'model_dir' hyperparameter
+            # injection (an S3 URI for native TF checkpointing) - it collides with
+            # train.py's own --model_dir argument and, if injected, overrides the
+            # correct SM_MODEL_DIR (/opt/ml/model) with an S3 path, causing
+            # model.joblib/model.keras to be saved to the wrong place. See
+            # pipeline.py's TrainingStep for the full explanation (this bit the
+            # SageMaker Pipeline path; applying it here too for consistency).
+            model_dir=False,
         )
 
         logger.info(f"Launching training job: {job_name}")
