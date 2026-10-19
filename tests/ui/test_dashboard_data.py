@@ -130,6 +130,15 @@ def test_load_batch_predictions_reads_headerless_local_csv(tmp_path):
     np.testing.assert_array_equal(predictions, np.array([1.25, 2.5, 3.75]))
 
 
+def test_load_batch_predictions_reads_single_comma_line_local_csv(tmp_path):
+    predictions_path = tmp_path / 'predictions.csv.out'
+    predictions_path.write_text('1.25,2.5,3.75')
+
+    predictions = load_batch_predictions(str(predictions_path))
+
+    np.testing.assert_array_equal(predictions, np.array([1.25, 2.5, 3.75]))
+
+
 def test_predictions_vs_actuals_aligns_rows_and_rejects_mismatch():
     test_df = make_raw_df(n_days=60)
     from src.aws.sagemaker.monitoring_reports import batch_feature_frame

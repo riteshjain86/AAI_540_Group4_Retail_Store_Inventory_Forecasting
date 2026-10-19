@@ -1,6 +1,6 @@
 """Data loaders and transformations used by the Streamlit dashboard."""
 
-from io import BytesIO
+from pathlib import Path
 from urllib.parse import urlparse
 
 import numpy as np
@@ -111,24 +111,23 @@ def load_loss_curves(tracking_uri: str, run_id: str) -> pd.DataFrame:
 
 
 def load_batch_predictions(source: str) -> np.ndarray:
-    """Load a headerless, single-column batch-transform CSV from disk or S3."""
+    """Load batch-transform predictions from local or S3 text output."""
     if source.startswith('s3://'):
         parsed = urlparse(source)
         if not parsed.netloc or not parsed.path.lstrip('/'):
             raise ValueError(f'Invalid S3 predictions URI: {source}')
         import boto3
 
-        body = boto3.client('s3').get_object(
+        text = boto3.client('s3').get_object(
             Bucket=parsed.netloc,
             Key=parsed.path.lstrip('/'),
-        )['Body'].read()
-        frame = pd.read_csv(BytesIO(body), header=None)
+        )['Body'].read().decode('utf-8')
     else:
-        frame = pd.read_csv(source, header=None)
+        text = Path(source).read_text()
 
-    if frame.shape[1] != 1:
-        raise ValueError(f'Expected a headerless single-column predictions CSV, found {frame.shape[1]} columns')
-    return pd.to_numeric(frame.iloc[:, 0], errors='raise').to_numpy(dtype=float)
+    from src.aws.sagemaker.monitoring_reports import parse_batch_output
+
+    return parse_batch_output(text)
 
 
 def predictions_vs_actuals(test_df: pd.DataFrame, predictions) -> pd.DataFrame:
