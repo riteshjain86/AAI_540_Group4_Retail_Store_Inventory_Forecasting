@@ -305,8 +305,20 @@ python deploy_sagemaker_lab.py        # sanity-checks AWS clients, prints next s
 
 ## Dashboard
 
-Run the dashboard from the repository root with `streamlit run src/ui/app.py`. In SageMaker Studio JupyterLab,
-open `https://<studio-domain>/jupyter/default/proxy/8501/` to view the app.
+From the repository root, install Streamlit and MLflow if needed, then run:
+
+```bash
+pip install streamlit mlflow
+streamlit run src/ui/app.py --server.headless true --server.enableCORS false --server.enableXsrfProtection false
+```
+
+In SageMaker Studio JupyterLab, open `https://<space-id>.studio.<region>.sagemaker.aws/jupyterlab/default/proxy/8501/`.
+Get this URL from the JupyterLab address by replacing everything after `/jupyterlab/default/` with `proxy/8501/`.
+Streamlit's Network and External URLs are not reachable from outside the Studio container. Classic Studio uses
+`/jupyter/default/proxy/8501/`.
+
+Model comparison reads `mlflow.db` in the repository root (`mlflow.tracking_uri` in `config.yaml`); run
+`python -m src.pipelines.training_pipeline` from the repository root first.
 
 ---
 
