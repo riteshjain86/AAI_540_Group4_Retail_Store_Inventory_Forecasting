@@ -28,10 +28,19 @@ def model_fn(model_dir):
 
 
 def input_fn(request_body, request_content_type):
-    """Parse batch input. CSV rows are tabular features (used by classical models)."""
+    """Parse batch input. CSV rows are tabular features (used by classical models).
+
+    The uploaded batch input CSV has no header row (see
+    batch_inference.py's prepare_batch_input()), so the column names/order
+    must be assigned explicitly here to match exactly - the ColumnTransformer
+    inside the fitted Pipeline selects columns by name, not position.
+    """
     if request_content_type == 'text/csv':
         from io import StringIO
-        return pd.read_csv(StringIO(request_body))
+        from train import NUMERIC_COLS, CATEGORICAL_COLS
+        df = pd.read_csv(StringIO(request_body), header=None)
+        df.columns = NUMERIC_COLS + CATEGORICAL_COLS
+        return df
     if request_content_type == 'application/json':
         payload = json.loads(request_body)
         return pd.DataFrame(payload)
