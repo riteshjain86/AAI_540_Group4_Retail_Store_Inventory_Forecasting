@@ -76,7 +76,6 @@ class SageMakerBatchInference:
             instance_count=instance_count,
             instance_type=instance_type,
             output_path=f"s3://{self.bucket_name}/{self.base_prefix}/predictions/",
-            sagemaker_session=self.sagemaker_session,
         )
 
         logger.info("Transformer created")
