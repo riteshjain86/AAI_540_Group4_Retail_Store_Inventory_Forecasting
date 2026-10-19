@@ -116,13 +116,27 @@ class SageMakerTrainingJob:
 
 
 def main():
-    """Main function to launch a training job."""
+    """
+    Main function to launch a training job.
+
+    By default trains the LSTM (the primary model per the design document).
+    Set MODEL_TYPE=ridge to train the classical baseline instead (e.g. for
+    the batch-transform deployment path, which only supports tabular models).
+    """
     trainer = SageMakerTrainingJob()
 
     train_s3_uri = f"s3://{trainer.bucket_name}/{trainer.base_prefix}/train/train.parquet"
     val_s3_uri = f"s3://{trainer.bucket_name}/{trainer.base_prefix}/val/val.parquet"
 
-    estimator = trainer.launch_training_job(train_s3_uri, val_s3_uri)
+    model_type = os.environ.get('MODEL_TYPE', 'lstm')
+    hyperparameters = None
+    if model_type == 'ridge':
+        hyperparameters = {
+            'model_type': 'ridge',
+            'ridge_alpha': float(os.environ.get('RIDGE_ALPHA', '1.0')),
+        }
+
+    estimator = trainer.launch_training_job(train_s3_uri, val_s3_uri, hyperparameters=hyperparameters)
     print(f"Training job launched: {estimator._current_job_name}")
 
 
