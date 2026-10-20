@@ -1,6 +1,9 @@
 # Retail Store Inventory Demand Forecasting
 
 **Group 4 — AAI-540 Final Project**
+Members Name:
+1.Ved Prakash Dwivedi
+2. Ritesh Jain
 
 **Business scenario:** Retail Store Inventory Forecasting (academic project)
 **Date:** October 2026
